@@ -1,0 +1,1931 @@
+-- Lumen - group gate window
+-- Pick a language (auto-detected), tap Join Group: the link is copied, paste it in your browser and join.
+-- Then come back and press "Check Again": if you're in the group, the script unlocks.
+-- "-" minimizes to a bubble (tap the bubble to reopen). No close button.
+
+------------ CONFIG ------------
+local NAME = "Lumen"
+local GROUP_LINK = "https://roblox.com./communities/9529552772/" -- test it first: it must open roblox.com
+local GROUP_ID = 9529552772
+local GROUP_NAME = "Your Group"   -- only used in the "couldn't copy the link" message
+local MIN_ACCOUNT_AGE_DAYS = 10   -- accounts younger than this are treated as alts. Set to 0 to turn the check off
+local KICK_NEW_ACCOUNTS = true    -- true: kick the new account out of the game. false: just stop the window from showing
+local SKIP_IF_ALREADY_MEMBER = true -- true: players who are already in the group never see the window
+local USE_HTTP_CHECK = false      -- false: safe check (no freezing). true: also use the executor's HTTP request (fresher, but can freeze some mobile executors)
+local KICK_MESSAGE = "New or alt accounts are not allowed. Please use your main account." -- English text (keep it short, Roblox cuts long kick messages); auto-translated to the player's language (see the kick line in each language of STR below)
+
+local function ON_UNLOCK()
+	-- Runs once the player is confirmed to be in the group. Put your script here, for example:
+	-- loadstring(game:HttpGet("https://example.com/your-script.lua"))()
+end
+--------------------------------
+
+local Players = game:GetService("Players")
+local TweenService = game:GetService("TweenService")
+local UserInputService = game:GetService("UserInputService")
+local HttpService = game:GetService("HttpService")
+local StarterGui = game:GetService("StarterGui")
+local Lighting = game:GetService("Lighting")
+local LocalizationService = game:GetService("LocalizationService")
+
+-- setup check: both the link and the group number are needed
+if GROUP_ID == 0 then
+	GROUP_ID = tonumber(string.match(GROUP_LINK, "groups/(%d+)") or string.match(GROUP_LINK, "communities/(%d+)") or "") or 0
+end
+local setupError
+if GROUP_LINK == "" or GROUP_LINK == "YOUR_GROUP_LINK_HERE" then
+	setupError = "Set GROUP_LINK at the top of the script first."
+elseif GROUP_ID == 0 then
+	setupError = "Set GROUP_ID at the top of the script first (the number in your group's roblox.com link)."
+end
+if setupError then
+	warn("[" .. NAME .. "] " .. setupError)
+	pcall(function()
+		StarterGui:SetCore("SendNotification", { Title = NAME, Text = setupError, Duration = 10 })
+	end)
+	return
+end
+
+local LocalPlayer = Players.LocalPlayer
+while not LocalPlayer do
+	Players:GetPropertyChangedSignal("LocalPlayer"):Wait()
+	LocalPlayer = Players.LocalPlayer
+end
+
+local C = {
+	bg = Color3.fromRGB(12, 12, 17),
+	surface = Color3.fromRGB(21, 21, 29),
+	surfaceHover = Color3.fromRGB(30, 30, 40),
+	stroke = Color3.fromRGB(38, 38, 52),
+	strokeHover = Color3.fromRGB(72, 72, 96),
+	text = Color3.fromRGB(242, 242, 248),
+	muted = Color3.fromRGB(128, 131, 154),
+	accent = Color3.fromRGB(139, 124, 255),
+	accent2 = Color3.fromRGB(86, 160, 255),
+	success = Color3.fromRGB(110, 231, 160),
+	danger = Color3.fromRGB(248, 113, 113),
+	white = Color3.new(1, 1, 1),
+}
+
+---------------- layout ----------------
+-- Wide screens (PC, tablets, phones held sideways): sidebar on the left.
+-- Narrow portrait phones: a compact window with the tabs in a row under the title bar.
+local function viewportSize()
+	local cam = workspace.CurrentCamera
+	local v = cam and cam.ViewportSize
+	if v and v.X > 50 and v.Y > 50 then return v end
+	return Vector2.new(1280, 720)
+end
+local VP = viewportSize()
+local COMPACT = VP.X < 640 and VP.X < VP.Y
+local onTouch = UserInputService.TouchEnabled and not UserInputService.KeyboardEnabled
+
+local CORNER, HEADER = 18, 48
+local TABBAR = COMPACT and 44 or 0
+local SIDEBAR = COMPACT and 0 or 150
+local W = COMPACT and 340 or 540
+local PAGE_W, PAGE_H = W - SIDEBAR, 308
+local PAGE_Y = HEADER + TABBAR
+local H = PAGE_Y + PAGE_H
+
+---------------- helpers ----------------
+local function make(class, props, parent)
+	local obj = Instance.new(class)
+	for k, v in pairs(props) do obj[k] = v end
+	obj.Parent = parent
+	return obj
+end
+
+local function tween(obj, t, props, style)
+	TweenService:Create(obj, TweenInfo.new(t, style or Enum.EasingStyle.Quint, Enum.EasingDirection.Out), props):Play()
+end
+
+local function round(obj, r)
+	return make("UICorner", { CornerRadius = UDim.new(0, r) }, obj)
+end
+
+local function stroke(obj, color, thickness, transparency)
+	return make("UIStroke", {
+		Color = color, Thickness = thickness or 1, Transparency = transparency or 0,
+		ApplyStrokeMode = Enum.ApplyStrokeMode.Border,
+	}, obj)
+end
+
+local function label(props, parent)
+	props.BackgroundTransparency = 1
+	props.BorderSizePixel = 0
+	props.Font = props.Font or Enum.Font.Gotham
+	return make("TextLabel", props, parent)
+end
+
+-- text that shrinks to fit instead of getting cut off (long translations)
+local function fitLabel(props, parent, maxSize)
+	props.TextScaled = true
+	local l = label(props, parent)
+	make("UITextSizeConstraint", { MaxTextSize = maxSize, MinTextSize = 8 }, l)
+	return l
+end
+
+-- endless gradient rotation from one looping tween (no per-frame code)
+local function spin(grad, seconds)
+	TweenService:Create(grad, TweenInfo.new(seconds, Enum.EasingStyle.Linear, Enum.EasingDirection.Out, -1), { Rotation = 360 }):Play()
+end
+
+local function sweep(dark, bright)
+	local k = ColorSequenceKeypoint.new
+	return ColorSequence.new({ k(0, dark), k(0.35, dark), k(0.5, bright), k(0.65, dark), k(1, dark) })
+end
+
+local function copy(str)
+	local clip = setclipboard or toclipboard
+	return (clip and pcall(clip, str)) or false
+end
+
+-- hover/press wiring that also resets on touch screens (they have no MouseLeave)
+local function bind(btn, enter, leave, down, up)
+	btn.MouseEnter:Connect(enter)
+	btn.MouseLeave:Connect(leave)
+	btn.InputEnded:Connect(function(input)
+		if input.UserInputType == Enum.UserInputType.Touch then leave() end
+	end)
+	if down then btn.MouseButton1Down:Connect(down) end
+	if up then btn.MouseButton1Up:Connect(up) end
+end
+
+---------------- languages ----------------
+-- To add a language: add it to LANGS, then copy the "en" block in STR and translate it.
+-- Missing lines fall back to English. Languages whose script is missing from the Gotham font
+-- (Arabic, Hebrew, Thai, Hindi, Bengali...) use Roblox's fallback fonts, so check how they look.
+local LANGS = {
+	{ "en", "English" },
+	{ "es", "Espa\u{f1}ol" },
+	{ "pt", "Portugu\u{ea}s" },
+	{ "ru", "\u{420}\u{443}\u{441}\u{441}\u{43a}\u{438}\u{439}" },
+	{ "tr", "T\u{fc}rk\u{e7}e" },
+	{ "ar", "\u{627}\u{644}\u{639}\u{631}\u{628}\u{64a}\u{629}" },
+	{ "id", "Indonesia" },
+	{ "vi", "Ti\u{1ebf}ng Vi\u{1ec7}t" },
+	{ "fil", "Filipino" },
+	{ "fr", "Fran\u{e7}ais" },
+	{ "de", "Deutsch" },
+	{ "pl", "Polski" },
+	{ "th", "\u{e44}\u{e17}\u{e22}" },
+	{ "it", "Italiano" },
+	{ "ko", "\u{d55c}\u{ad6d}\u{c5b4}" },
+	{ "ja", "\u{65e5}\u{672c}\u{8a9e}" },
+	{ "zh", "\u{7b80}\u{4f53}\u{4e2d}\u{6587}" },
+	{ "zht", "\u{7e41}\u{9ad4}\u{4e2d}\u{6587}" },
+	{ "nl", "Nederlands" },
+	{ "uk", "\u{423}\u{43a}\u{440}\u{430}\u{457}\u{43d}\u{441}\u{44c}\u{43a}\u{430}" },
+	{ "ro", "Rom\u{e2}n\u{103}" },
+	{ "hi", "\u{939}\u{93f}\u{928}\u{94d}\u{926}\u{940}" },
+	{ "ms", "Melayu" },
+	{ "he", "\u{5e2}\u{5d1}\u{5e8}\u{5d9}\u{5ea}" },
+	{ "fa", "\u{641}\u{627}\u{631}\u{633}\u{6cc}" },
+	{ "ur", "\u{627}\u{631}\u{62f}\u{648}" },
+	{ "bn", "\u{9ac}\u{9be}\u{982}\u{9b2}\u{9be}" },
+	{ "sv", "Svenska" },
+	{ "no", "Norsk" },
+	{ "da", "Dansk" },
+	{ "fi", "Suomi" },
+	{ "cs", "\u{10c}e\u{161}tina" },
+	{ "sk", "Sloven\u{10d}ina" },
+	{ "hu", "Magyar" },
+	{ "el", "\u{395}\u{3bb}\u{3bb}\u{3b7}\u{3bd}\u{3b9}\u{3ba}\u{3ac}" },
+	{ "bg", "\u{411}\u{44a}\u{43b}\u{433}\u{430}\u{440}\u{441}\u{43a}\u{438}" },
+	{ "sr", "Srpski" },
+	{ "hr", "Hrvatski" },
+	{ "sl", "Sloven\u{161}\u{10d}ina" },
+	{ "lt", "Lietuvi\u{173}" },
+	{ "lv", "Latvie\u{161}u" },
+	{ "et", "Eesti" },
+	{ "ca", "Catal\u{e0}" },
+	{ "az", "Az\u{259}rbaycan" },
+	{ "sw", "Kiswahili" },
+}
+
+local STR = {
+	en = {
+		join_title = "Unlock the script",
+		join_sub = "To unlock the script, you need to join the group.",
+		s1 = "Tap Join Group. The link gets copied.",
+		s2 = "Open your browser and paste it in.",
+		s3 = "Press Join on the group page. Done!",
+		join_btn = "Join Group",
+		link_copied = "Link copied. Paste it in your browser.",
+		copy_failed = "Couldn't copy. Search \u{201c}%s\u{201d} on Roblox and join.",
+		tab_join = "Unlock",
+		tab_lang = "Language",
+		lang_sub = "Choose your language",
+		already = "You're already in the group. Thanks!",
+		check_title = "Check Again",
+		check_sub = "Joined the group? Press here to verify",
+		checking = "Checking...",
+		not_in_group = "Oops, looks like you're not in the group yet.",
+		verified = "Verified! Script unlocked.",
+		kick = KICK_MESSAGE,
+	},
+	es = {
+		join_title = "Desbloquea el script",
+		join_sub = "Para desbloquear el script, debes unirte al grupo.",
+		s1 = "Pulsa Unirse al grupo. El enlace se copia.",
+		s2 = "Abre tu navegador y p\u{e9}galo.",
+		s3 = "Pulsa Unirse en la p\u{e1}gina del grupo. \u{a1}Listo!",
+		join_btn = "Unirse al grupo",
+		link_copied = "Enlace copiado. P\u{e9}galo en tu navegador.",
+		copy_failed = "No se pudo copiar. Busca \u{201c}%s\u{201d} en Roblox y \u{fa}nete.",
+		tab_join = "Desbloquear",
+		tab_lang = "Idioma",
+		lang_sub = "Elige tu idioma",
+		already = "Ya est\u{e1}s en el grupo. \u{a1}Gracias!",
+		check_title = "Comprobar de nuevo",
+		check_sub = "\u{bf}Ya te uniste al grupo? Pulsa aqu\u{ed} para verificar",
+		checking = "Comprobando...",
+		not_in_group = "Vaya, parece que a\u{fa}n no est\u{e1}s en el grupo.",
+		verified = "\u{a1}Verificado! Script desbloqueado.",
+		kick = "No se permiten cuentas nuevas ni alternas. Usa tu cuenta principal.",
+	},
+	pt = {
+		join_title = "Libere o script",
+		join_sub = "Para liberar o script, voc\u{ea} precisa entrar no grupo.",
+		s1 = "Toque em Entrar no grupo. O link \u{e9} copiado.",
+		s2 = "Abra o navegador e cole o link.",
+		s3 = "Toque em Entrar na p\u{e1}gina do grupo. Pronto!",
+		join_btn = "Entrar no grupo",
+		link_copied = "Link copiado. Cole no seu navegador.",
+		copy_failed = "N\u{e3}o deu para copiar. Busque \u{201c}%s\u{201d} no Roblox e entre.",
+		tab_join = "Liberar",
+		tab_lang = "Idioma",
+		lang_sub = "Escolha seu idioma",
+		already = "Voc\u{ea} j\u{e1} est\u{e1} no grupo. Obrigado!",
+		check_title = "Verificar novamente",
+		check_sub = "J\u{e1} entrou no grupo? Toque aqui para verificar",
+		checking = "Verificando...",
+		not_in_group = "Ops, parece que voc\u{ea} ainda n\u{e3}o est\u{e1} no grupo.",
+		verified = "Verificado! Script liberado.",
+		kick = "Contas novas ou alts n\u{e3}o s\u{e3}o permitidas. Use sua conta principal.",
+	},
+	ru = {
+		join_title = "\u{420}\u{430}\u{437}\u{431}\u{43b}\u{43e}\u{43a}\u{438}\u{440}\u{443}\u{439} \u{441}\u{43a}\u{440}\u{438}\u{43f}\u{442}",
+		join_sub = "\u{427}\u{442}\u{43e}\u{431}\u{44b} \u{440}\u{430}\u{437}\u{431}\u{43b}\u{43e}\u{43a}\u{438}\u{440}\u{43e}\u{432}\u{430}\u{442}\u{44c} \u{441}\u{43a}\u{440}\u{438}\u{43f}\u{442}, \u{43d}\u{443}\u{436}\u{43d}\u{43e} \u{432}\u{441}\u{442}\u{443}\u{43f}\u{438}\u{442}\u{44c} \u{432} \u{433}\u{440}\u{443}\u{43f}\u{43f}\u{443}.",
+		s1 = "\u{41d}\u{430}\u{436}\u{43c}\u{438} \u{ab}\u{412}\u{441}\u{442}\u{443}\u{43f}\u{438}\u{442}\u{44c} \u{432} \u{433}\u{440}\u{443}\u{43f}\u{43f}\u{443}\u{bb}. \u{421}\u{441}\u{44b}\u{43b}\u{43a}\u{430} \u{441}\u{43a}\u{43e}\u{43f}\u{438}\u{440}\u{443}\u{435}\u{442}\u{441}\u{44f}.",
+		s2 = "\u{41e}\u{442}\u{43a}\u{440}\u{43e}\u{439} \u{431}\u{440}\u{430}\u{443}\u{437}\u{435}\u{440} \u{438} \u{432}\u{441}\u{442}\u{430}\u{432}\u{44c} \u{435}\u{451}.",
+		s3 = "\u{41d}\u{430}\u{436}\u{43c}\u{438} \u{ab}\u{412}\u{441}\u{442}\u{443}\u{43f}\u{438}\u{442}\u{44c}\u{bb} \u{43d}\u{430} \u{441}\u{442}\u{440}\u{430}\u{43d}\u{438}\u{446}\u{435} \u{433}\u{440}\u{443}\u{43f}\u{43f}\u{44b}. \u{413}\u{43e}\u{442}\u{43e}\u{432}\u{43e}!",
+		join_btn = "\u{412}\u{441}\u{442}\u{443}\u{43f}\u{438}\u{442}\u{44c} \u{432} \u{433}\u{440}\u{443}\u{43f}\u{43f}\u{443}",
+		link_copied = "\u{421}\u{441}\u{44b}\u{43b}\u{43a}\u{430} \u{441}\u{43a}\u{43e}\u{43f}\u{438}\u{440}\u{43e}\u{432}\u{430}\u{43d}\u{430}. \u{412}\u{441}\u{442}\u{430}\u{432}\u{44c} \u{435}\u{451} \u{432} \u{431}\u{440}\u{430}\u{443}\u{437}\u{435}\u{440}.",
+		copy_failed = "\u{41d}\u{435} \u{443}\u{434}\u{430}\u{43b}\u{43e}\u{441}\u{44c} \u{441}\u{43a}\u{43e}\u{43f}\u{438}\u{440}\u{43e}\u{432}\u{430}\u{442}\u{44c}. \u{41d}\u{430}\u{439}\u{434}\u{438} \u{ab}%s\u{bb} \u{432} Roblox \u{438} \u{432}\u{441}\u{442}\u{443}\u{43f}\u{438}.",
+		tab_join = "\u{41e}\u{442}\u{43a}\u{440}\u{44b}\u{442}\u{44c}",
+		tab_lang = "\u{42f}\u{437}\u{44b}\u{43a}",
+		lang_sub = "\u{412}\u{44b}\u{431}\u{435}\u{440}\u{438} \u{44f}\u{437}\u{44b}\u{43a}",
+		already = "\u{422}\u{44b} \u{443}\u{436}\u{435} \u{432} \u{433}\u{440}\u{443}\u{43f}\u{43f}\u{435}. \u{421}\u{43f}\u{430}\u{441}\u{438}\u{431}\u{43e}!",
+		check_title = "\u{41f}\u{440}\u{43e}\u{432}\u{435}\u{440}\u{438}\u{442}\u{44c} \u{441}\u{43d}\u{43e}\u{432}\u{430}",
+		check_sub = "\u{423}\u{436}\u{435} \u{432}\u{441}\u{442}\u{443}\u{43f}\u{438}\u{43b} \u{432} \u{433}\u{440}\u{443}\u{43f}\u{43f}\u{443}? \u{41d}\u{430}\u{436}\u{43c}\u{438} \u{437}\u{434}\u{435}\u{441}\u{44c} \u{434}\u{43b}\u{44f} \u{43f}\u{440}\u{43e}\u{432}\u{435}\u{440}\u{43a}\u{438}",
+		checking = "\u{41f}\u{440}\u{43e}\u{432}\u{435}\u{440}\u{44f}\u{435}\u{43c}...",
+		not_in_group = "\u{423}\u{43f}\u{441}, \u{43f}\u{43e}\u{445}\u{43e}\u{436}\u{435}, \u{442}\u{44b} \u{435}\u{449}\u{451} \u{43d}\u{435} \u{432} \u{433}\u{440}\u{443}\u{43f}\u{43f}\u{435}.",
+		verified = "\u{41f}\u{440}\u{43e}\u{432}\u{435}\u{440}\u{435}\u{43d}\u{43e}! \u{421}\u{43a}\u{440}\u{438}\u{43f}\u{442} \u{440}\u{430}\u{437}\u{431}\u{43b}\u{43e}\u{43a}\u{438}\u{440}\u{43e}\u{432}\u{430}\u{43d}.",
+		kick = "\u{41d}\u{43e}\u{432}\u{44b}\u{435} \u{438} \u{430}\u{43b}\u{44c}\u{442}-\u{430}\u{43a}\u{43a}\u{430}\u{443}\u{43d}\u{442}\u{44b} \u{437}\u{430}\u{43f}\u{440}\u{435}\u{449}\u{435}\u{43d}\u{44b}. \u{418}\u{441}\u{43f}\u{43e}\u{43b}\u{44c}\u{437}\u{443}\u{439} \u{43e}\u{441}\u{43d}\u{43e}\u{432}\u{43d}\u{43e}\u{439} \u{430}\u{43a}\u{43a}\u{430}\u{443}\u{43d}\u{442}.",
+	},
+	tr = {
+		join_title = "Scripti a\u{e7}",
+		join_sub = "Scripti a\u{e7}mak i\u{e7}in gruba kat\u{131}lman gerekiyor.",
+		s1 = "Gruba Kat\u{131}l'a bas. Ba\u{11f}lant\u{131} kopyalan\u{131}r.",
+		s2 = "Taray\u{131}c\u{131}n\u{131} a\u{e7} ve yap\u{131}\u{15f}t\u{131}r.",
+		s3 = "Grup sayfas\u{131}nda Kat\u{131}l'a bas. Bitti!",
+		join_btn = "Gruba Kat\u{131}l",
+		link_copied = "Ba\u{11f}lant\u{131} kopyaland\u{131}. Taray\u{131}c\u{131}na yap\u{131}\u{15f}t\u{131}r.",
+		copy_failed = "Kopyalanamad\u{131}. Roblox'ta \u{201c}%s\u{201d} ara ve kat\u{131}l.",
+		tab_join = "Kilidi A\u{e7}",
+		tab_lang = "Dil",
+		lang_sub = "Dilini se\u{e7}",
+		already = "Zaten gruptas\u{131}n. Te\u{15f}ekk\u{fc}rler!",
+		check_title = "Tekrar Kontrol Et",
+		check_sub = "Gruba kat\u{131}ld\u{131}n m\u{131}? Do\u{11f}rulamak i\u{e7}in buraya bas",
+		checking = "Kontrol ediliyor...",
+		not_in_group = "Hay aksi, hen\u{fc}z grupta de\u{11f}ilsin gibi g\u{f6}r\u{fc}n\u{fc}yor.",
+		verified = "Do\u{11f}ruland\u{131}! Script a\u{e7}\u{131}ld\u{131}.",
+		kick = "Yeni ve alternatif hesaplar yasak. Ana hesab\u{131}n\u{131} kullan.",
+	},
+	ar = {
+		join_title = "\u{627}\u{641}\u{62a}\u{62d} \u{627}\u{644}\u{633}\u{643}\u{631}\u{628}\u{62a}",
+		join_sub = "\u{644}\u{641}\u{62a}\u{62d} \u{627}\u{644}\u{633}\u{643}\u{631}\u{628}\u{62a} \u{64a}\u{62c}\u{628} \u{623}\u{646} \u{62a}\u{646}\u{636}\u{645} \u{625}\u{644}\u{649} \u{627}\u{644}\u{645}\u{62c}\u{645}\u{648}\u{639}\u{629}.",
+		s1 = "\u{627}\u{636}\u{63a}\u{637} \u{639}\u{644}\u{649} \u{ab}\u{627}\u{646}\u{636}\u{645} \u{625}\u{644}\u{649} \u{627}\u{644}\u{645}\u{62c}\u{645}\u{648}\u{639}\u{629}\u{bb} \u{644}\u{64a}\u{62a}\u{645} \u{646}\u{633}\u{62e} \u{627}\u{644}\u{631}\u{627}\u{628}\u{637}.",
+		s2 = "\u{627}\u{641}\u{62a}\u{62d} \u{627}\u{644}\u{645}\u{62a}\u{635}\u{641}\u{62d} \u{648}\u{627}\u{644}\u{635}\u{642} \u{627}\u{644}\u{631}\u{627}\u{628}\u{637}.",
+		s3 = "\u{627}\u{636}\u{63a}\u{637} \u{ab}\u{627}\u{646}\u{636}\u{645}\u{627}\u{645}\u{bb} \u{641}\u{64a} \u{635}\u{641}\u{62d}\u{629} \u{627}\u{644}\u{645}\u{62c}\u{645}\u{648}\u{639}\u{629}. \u{627}\u{646}\u{62a}\u{647}\u{64a}\u{646}\u{627}!",
+		join_btn = "\u{627}\u{646}\u{636}\u{645} \u{625}\u{644}\u{649} \u{627}\u{644}\u{645}\u{62c}\u{645}\u{648}\u{639}\u{629}",
+		link_copied = "\u{62a}\u{645} \u{646}\u{633}\u{62e} \u{627}\u{644}\u{631}\u{627}\u{628}\u{637}. \u{627}\u{644}\u{635}\u{642}\u{647} \u{641}\u{64a} \u{627}\u{644}\u{645}\u{62a}\u{635}\u{641}\u{62d}.",
+		copy_failed = "\u{62a}\u{639}\u{630}\u{651}\u{631} \u{627}\u{644}\u{646}\u{633}\u{62e}. \u{627}\u{628}\u{62d}\u{62b} \u{639}\u{646} \u{ab}%s\u{bb} \u{641}\u{64a} \u{631}\u{648}\u{628}\u{644}\u{648}\u{643}\u{633} \u{648}\u{627}\u{646}\u{636}\u{645}.",
+		tab_join = "\u{641}\u{62a}\u{62d}",
+		tab_lang = "\u{627}\u{644}\u{644}\u{63a}\u{629}",
+		lang_sub = "\u{627}\u{62e}\u{62a}\u{631} \u{644}\u{63a}\u{62a}\u{643}",
+		already = "\u{623}\u{646}\u{62a} \u{628}\u{627}\u{644}\u{641}\u{639}\u{644} \u{641}\u{64a} \u{627}\u{644}\u{645}\u{62c}\u{645}\u{648}\u{639}\u{629}. \u{634}\u{643}\u{631}\u{64b}\u{627}!",
+		check_title = "\u{62a}\u{62d}\u{642}\u{642} \u{645}\u{631}\u{629} \u{623}\u{62e}\u{631}\u{649}",
+		check_sub = "\u{647}\u{644} \u{627}\u{646}\u{636}\u{645}\u{645}\u{62a} \u{625}\u{644}\u{649} \u{627}\u{644}\u{645}\u{62c}\u{645}\u{648}\u{639}\u{629}\u{61f} \u{627}\u{636}\u{63a}\u{637} \u{647}\u{646}\u{627} \u{644}\u{644}\u{62a}\u{62d}\u{642}\u{642}",
+		checking = "\u{62c}\u{627}\u{631}\u{64d} \u{627}\u{644}\u{62a}\u{62d}\u{642}\u{642}...",
+		not_in_group = "\u{639}\u{630}\u{631}\u{64b}\u{627}\u{60c} \u{64a}\u{628}\u{62f}\u{648} \u{623}\u{646}\u{643} \u{644}\u{633}\u{62a} \u{641}\u{64a} \u{627}\u{644}\u{645}\u{62c}\u{645}\u{648}\u{639}\u{629} \u{628}\u{639}\u{62f}.",
+		verified = "\u{62a}\u{645} \u{627}\u{644}\u{62a}\u{62d}\u{642}\u{642}! \u{62a}\u{645} \u{641}\u{62a}\u{62d} \u{627}\u{644}\u{633}\u{643}\u{631}\u{628}\u{62a}.",
+		kick = "\u{627}\u{644}\u{62d}\u{633}\u{627}\u{628}\u{627}\u{62a} \u{627}\u{644}\u{62c}\u{62f}\u{64a}\u{62f}\u{629} \u{648}\u{627}\u{644}\u{628}\u{62f}\u{64a}\u{644}\u{629} \u{645}\u{645}\u{646}\u{648}\u{639}\u{629}. \u{627}\u{633}\u{62a}\u{62e}\u{62f}\u{645} \u{62d}\u{633}\u{627}\u{628}\u{643} \u{627}\u{644}\u{631}\u{626}\u{64a}\u{633}\u{64a}.",
+	},
+	id = {
+		join_title = "Buka script",
+		join_sub = "Untuk membuka script, kamu harus bergabung ke grup.",
+		s1 = "Tekan Gabung Grup. Tautan akan disalin.",
+		s2 = "Buka browser lalu tempel tautannya.",
+		s3 = "Tekan Gabung di halaman grup. Selesai!",
+		join_btn = "Gabung Grup",
+		link_copied = "Tautan disalin. Tempel di browser.",
+		copy_failed = "Gagal menyalin. Cari \u{201c}%s\u{201d} di Roblox lalu gabung.",
+		tab_join = "Buka",
+		tab_lang = "Bahasa",
+		lang_sub = "Pilih bahasa kamu",
+		already = "Kamu sudah ada di grup. Terima kasih!",
+		check_title = "Cek Lagi",
+		check_sub = "Sudah gabung grup? Tekan di sini untuk verifikasi",
+		checking = "Memeriksa...",
+		not_in_group = "Ups, sepertinya kamu belum ada di grup.",
+		verified = "Terverifikasi! Script terbuka.",
+		kick = "Akun baru atau alt dilarang. Gunakan akun utamamu.",
+	},
+	vi = {
+		join_title = "M\u{1edf} kh\u{f3}a script",
+		join_sub = "\u{110}\u{1ec3} m\u{1edf} kh\u{f3}a script, b\u{1ea1}n c\u{1ea7}n tham gia nh\u{f3}m.",
+		s1 = "Nh\u{1ea5}n Tham gia nh\u{f3}m. Li\u{ea}n k\u{1ebf}t s\u{1ebd} \u{111}\u{1b0}\u{1ee3}c sao ch\u{e9}p.",
+		s2 = "M\u{1edf} tr\u{ec}nh duy\u{1ec7}t v\u{e0} d\u{e1}n li\u{ea}n k\u{1ebf}t v\u{e0}o.",
+		s3 = "Nh\u{1ea5}n Tham gia tr\u{ea}n trang nh\u{f3}m. Xong!",
+		join_btn = "Tham gia nh\u{f3}m",
+		link_copied = "\u{110}\u{e3} sao ch\u{e9}p li\u{ea}n k\u{1ebf}t. H\u{e3}y d\u{e1}n v\u{e0}o tr\u{ec}nh duy\u{1ec7}t.",
+		copy_failed = "Kh\u{f4}ng sao ch\u{e9}p \u{111}\u{1b0}\u{1ee3}c. H\u{e3}y t\u{ec}m \u{201c}%s\u{201d} tr\u{ea}n Roblox r\u{1ed3}i tham gia.",
+		tab_join = "M\u{1edf} kh\u{f3}a",
+		tab_lang = "Ng\u{f4}n ng\u{1eef}",
+		lang_sub = "Ch\u{1ecd}n ng\u{f4}n ng\u{1eef}",
+		already = "B\u{1ea1}n \u{111}\u{e3} \u{1edf} trong nh\u{f3}m r\u{1ed3}i. C\u{1ea3}m \u{1a1}n!",
+		check_title = "Ki\u{1ec3}m tra l\u{1ea1}i",
+		check_sub = "\u{110}\u{e3} tham gia nh\u{f3}m? Nh\u{1ea5}n v\u{e0}o \u{111}\u{e2}y \u{111}\u{1ec3} x\u{e1}c minh",
+		checking = "\u{110}ang ki\u{1ec3}m tra...",
+		not_in_group = "\u{d4}i, c\u{f3} v\u{1ebb} b\u{1ea1}n ch\u{1b0}a \u{1edf} trong nh\u{f3}m.",
+		verified = "\u{110}\u{e3} x\u{e1}c minh! Script \u{111}\u{e3} \u{111}\u{1b0}\u{1ee3}c m\u{1edf} kh\u{f3}a.",
+		kick = "C\u{1ea5}m t\u{e0}i kho\u{1ea3}n m\u{1edb}i ho\u{1eb7}c t\u{e0}i kho\u{1ea3}n ph\u{1ee5}. H\u{e3}y d\u{f9}ng t\u{e0}i kho\u{1ea3}n ch\u{ed}nh.",
+	},
+	fil = {
+		join_title = "I-unlock ang script",
+		join_sub = "Para ma-unlock ang script, kailangan mong sumali sa grupo.",
+		s1 = "Pindutin ang Sumali. Makokopya ang link.",
+		s2 = "Buksan ang browser at i-paste ito.",
+		s3 = "Pindutin ang Sumali sa group page. Tapos na!",
+		join_btn = "Sumali sa Grupo",
+		link_copied = "Nakopya ang link. I-paste sa browser.",
+		copy_failed = "Hindi makopya. Hanapin ang \u{201c}%s\u{201d} sa Roblox at sumali.",
+		tab_join = "I-unlock",
+		tab_lang = "Wika",
+		lang_sub = "Piliin ang iyong wika",
+		already = "Nasa grupo ka na. Salamat!",
+		check_title = "Suriin Ulit",
+		check_sub = "Sumali ka na ba sa grupo? Pindutin dito para i-verify",
+		checking = "Sinusuri...",
+		not_in_group = "Naku, mukhang wala ka pa sa grupo.",
+		verified = "Na-verify! Na-unlock na ang script.",
+		kick = "Bawal ang bago o alt account. Gamitin ang main account mo.",
+	},
+	fr = {
+		join_title = "D\u{e9}bloquez le script",
+		join_sub = "Pour d\u{e9}bloquer le script, vous devez rejoindre le groupe.",
+		s1 = "Appuyez sur Rejoindre. Le lien est copi\u{e9}.",
+		s2 = "Ouvrez votre navigateur et collez-le.",
+		s3 = "Appuyez sur Rejoindre sur la page du groupe. C'est fini !",
+		join_btn = "Rejoindre le groupe",
+		link_copied = "Lien copi\u{e9}. Collez-le dans votre navigateur.",
+		copy_failed = "Copie impossible. Cherchez \u{ab} %s \u{bb} sur Roblox et rejoignez.",
+		tab_join = "D\u{e9}bloquer",
+		tab_lang = "Langue",
+		lang_sub = "Choisissez votre langue",
+		already = "Vous \u{ea}tes d\u{e9}j\u{e0} dans le groupe. Merci !",
+		check_title = "V\u{e9}rifier \u{e0} nouveau",
+		check_sub = "Vous avez rejoint le groupe ? Appuyez ici pour v\u{e9}rifier",
+		checking = "V\u{e9}rification...",
+		not_in_group = "Oups, vous ne semblez pas encore \u{ea}tre dans le groupe.",
+		verified = "V\u{e9}rifi\u{e9} ! Script d\u{e9}bloqu\u{e9}.",
+		kick = "Comptes neufs ou secondaires interdits. Utilise ton compte principal.",
+	},
+	de = {
+		join_title = "Schalte das Script frei",
+		join_sub = "Um das Script freizuschalten, musst du der Gruppe beitreten.",
+		s1 = "Tippe auf Gruppe beitreten. Der Link wird kopiert.",
+		s2 = "\u{d6}ffne den Browser und f\u{fc}ge ihn ein.",
+		s3 = "Tippe auf der Gruppenseite auf Beitreten. Fertig!",
+		join_btn = "Gruppe beitreten",
+		link_copied = "Link kopiert. F\u{fc}ge ihn im Browser ein.",
+		copy_failed = "Kopieren fehlgeschlagen. Suche \u{201e}%s\u{201c} auf Roblox und tritt bei.",
+		tab_join = "Freischalten",
+		tab_lang = "Sprache",
+		lang_sub = "W\u{e4}hle deine Sprache",
+		already = "Du bist schon in der Gruppe. Danke!",
+		check_title = "Erneut pr\u{fc}fen",
+		check_sub = "Schon beigetreten? Tippe hier zum \u{dc}berpr\u{fc}fen",
+		checking = "Wird gepr\u{fc}ft...",
+		not_in_group = "Hoppla, du scheinst noch nicht in der Gruppe zu sein.",
+		verified = "Best\u{e4}tigt! Script freigeschaltet.",
+		kick = "Neue oder Zweitaccounts sind verboten. Nutze deinen Hauptaccount.",
+	},
+	pl = {
+		join_title = "Odblokuj skrypt",
+		join_sub = "Aby odblokowa\u{107} skrypt, musisz do\u{142}\u{105}czy\u{107} do grupy.",
+		s1 = "Kliknij Do\u{142}\u{105}cz do grupy. Link si\u{119} skopiuje.",
+		s2 = "Otw\u{f3}rz przegl\u{105}dark\u{119} i wklej go.",
+		s3 = "Kliknij Do\u{142}\u{105}cz na stronie grupy. Gotowe!",
+		join_btn = "Do\u{142}\u{105}cz do grupy",
+		link_copied = "Link skopiowany. Wklej go w przegl\u{105}darce.",
+		copy_failed = "Nie uda\u{142}o si\u{119} skopiowa\u{107}. Wyszukaj \u{201e}%s\u{201d} w Roblox i do\u{142}\u{105}cz.",
+		tab_join = "Odblokuj",
+		tab_lang = "J\u{119}zyk",
+		lang_sub = "Wybierz j\u{119}zyk",
+		already = "Jeste\u{15b} ju\u{17c} w grupie. Dzi\u{119}ki!",
+		check_title = "Sprawd\u{17a} ponownie",
+		check_sub = "Do\u{142}\u{105}czy\u{142}e\u{15b} do grupy? Kliknij tutaj, aby zweryfikowa\u{107}",
+		checking = "Sprawdzanie...",
+		not_in_group = "Ups, wygl\u{105}da na to, \u{17c}e jeszcze nie jeste\u{15b} w grupie.",
+		verified = "Zweryfikowano! Skrypt odblokowany.",
+		kick = "Nowe i alternatywne konta s\u{105} zabronione. U\u{17c}yj g\u{142}\u{f3}wnego konta.",
+	},
+	th = {
+		join_title = "\u{e1b}\u{e25}\u{e14}\u{e25}\u{e47}\u{e2d}\u{e01}\u{e2a}\u{e04}\u{e23}\u{e34}\u{e1b}\u{e15}\u{e4c}",
+		join_sub = "\u{e2b}\u{e32}\u{e01}\u{e15}\u{e49}\u{e2d}\u{e07}\u{e01}\u{e32}\u{e23}\u{e1b}\u{e25}\u{e14}\u{e25}\u{e47}\u{e2d}\u{e01}\u{e2a}\u{e04}\u{e23}\u{e34}\u{e1b}\u{e15}\u{e4c} \u{e04}\u{e38}\u{e13}\u{e15}\u{e49}\u{e2d}\u{e07}\u{e40}\u{e02}\u{e49}\u{e32}\u{e23}\u{e48}\u{e27}\u{e21}\u{e01}\u{e25}\u{e38}\u{e48}\u{e21}",
+		s1 = "\u{e01}\u{e14}\u{e40}\u{e02}\u{e49}\u{e32}\u{e23}\u{e48}\u{e27}\u{e21}\u{e01}\u{e25}\u{e38}\u{e48}\u{e21} \u{e25}\u{e34}\u{e07}\u{e01}\u{e4c}\u{e08}\u{e30}\u{e16}\u{e39}\u{e01}\u{e04}\u{e31}\u{e14}\u{e25}\u{e2d}\u{e01}",
+		s2 = "\u{e40}\u{e1b}\u{e34}\u{e14}\u{e40}\u{e1a}\u{e23}\u{e32}\u{e27}\u{e4c}\u{e40}\u{e0b}\u{e2d}\u{e23}\u{e4c}\u{e41}\u{e25}\u{e49}\u{e27}\u{e27}\u{e32}\u{e07}\u{e25}\u{e34}\u{e07}\u{e01}\u{e4c}",
+		s3 = "\u{e01}\u{e14}\u{e40}\u{e02}\u{e49}\u{e32}\u{e23}\u{e48}\u{e27}\u{e21}\u{e43}\u{e19}\u{e2b}\u{e19}\u{e49}\u{e32}\u{e01}\u{e25}\u{e38}\u{e48}\u{e21} \u{e40}\u{e2a}\u{e23}\u{e47}\u{e08}\u{e41}\u{e25}\u{e49}\u{e27}!",
+		join_btn = "\u{e40}\u{e02}\u{e49}\u{e32}\u{e23}\u{e48}\u{e27}\u{e21}\u{e01}\u{e25}\u{e38}\u{e48}\u{e21}",
+		link_copied = "\u{e04}\u{e31}\u{e14}\u{e25}\u{e2d}\u{e01}\u{e25}\u{e34}\u{e07}\u{e01}\u{e4c}\u{e41}\u{e25}\u{e49}\u{e27} \u{e27}\u{e32}\u{e07}\u{e43}\u{e19}\u{e40}\u{e1a}\u{e23}\u{e32}\u{e27}\u{e4c}\u{e40}\u{e0b}\u{e2d}\u{e23}\u{e4c}\u{e44}\u{e14}\u{e49}\u{e40}\u{e25}\u{e22}",
+		copy_failed = "\u{e04}\u{e31}\u{e14}\u{e25}\u{e2d}\u{e01}\u{e44}\u{e21}\u{e48}\u{e2a}\u{e33}\u{e40}\u{e23}\u{e47}\u{e08} \u{e04}\u{e49}\u{e19}\u{e2b}\u{e32} \u{201c}%s\u{201d} \u{e43}\u{e19} Roblox \u{e41}\u{e25}\u{e49}\u{e27}\u{e40}\u{e02}\u{e49}\u{e32}\u{e23}\u{e48}\u{e27}\u{e21}",
+		tab_join = "\u{e1b}\u{e25}\u{e14}\u{e25}\u{e47}\u{e2d}\u{e01}",
+		tab_lang = "\u{e20}\u{e32}\u{e29}\u{e32}",
+		lang_sub = "\u{e40}\u{e25}\u{e37}\u{e2d}\u{e01}\u{e20}\u{e32}\u{e29}\u{e32}\u{e02}\u{e2d}\u{e07}\u{e04}\u{e38}\u{e13}",
+		already = "\u{e04}\u{e38}\u{e13}\u{e2d}\u{e22}\u{e39}\u{e48}\u{e43}\u{e19}\u{e01}\u{e25}\u{e38}\u{e48}\u{e21}\u{e41}\u{e25}\u{e49}\u{e27} \u{e02}\u{e2d}\u{e1a}\u{e04}\u{e38}\u{e13}!",
+		check_title = "\u{e15}\u{e23}\u{e27}\u{e08}\u{e2a}\u{e2d}\u{e1a}\u{e2d}\u{e35}\u{e01}\u{e04}\u{e23}\u{e31}\u{e49}\u{e07}",
+		check_sub = "\u{e40}\u{e02}\u{e49}\u{e32}\u{e23}\u{e48}\u{e27}\u{e21}\u{e01}\u{e25}\u{e38}\u{e48}\u{e21}\u{e41}\u{e25}\u{e49}\u{e27}\u{e43}\u{e0a}\u{e48}\u{e44}\u{e2b}\u{e21}? \u{e01}\u{e14}\u{e17}\u{e35}\u{e48}\u{e19}\u{e35}\u{e48}\u{e40}\u{e1e}\u{e37}\u{e48}\u{e2d}\u{e22}\u{e37}\u{e19}\u{e22}\u{e31}\u{e19}",
+		checking = "\u{e01}\u{e33}\u{e25}\u{e31}\u{e07}\u{e15}\u{e23}\u{e27}\u{e08}\u{e2a}\u{e2d}\u{e1a}...",
+		not_in_group = "\u{e44}\u{e21}\u{e48}\u{e19}\u{e30} \u{e14}\u{e39}\u{e40}\u{e2b}\u{e21}\u{e37}\u{e2d}\u{e19}\u{e04}\u{e38}\u{e13}\u{e22}\u{e31}\u{e07}\u{e44}\u{e21}\u{e48}\u{e44}\u{e14}\u{e49}\u{e2d}\u{e22}\u{e39}\u{e48}\u{e43}\u{e19}\u{e01}\u{e25}\u{e38}\u{e48}\u{e21}",
+		verified = "\u{e22}\u{e37}\u{e19}\u{e22}\u{e31}\u{e19}\u{e41}\u{e25}\u{e49}\u{e27}! \u{e1b}\u{e25}\u{e14}\u{e25}\u{e47}\u{e2d}\u{e01}\u{e2a}\u{e04}\u{e23}\u{e34}\u{e1b}\u{e15}\u{e4c}\u{e41}\u{e25}\u{e49}\u{e27}",
+		kick = "\u{e2b}\u{e49}\u{e32}\u{e21}\u{e43}\u{e0a}\u{e49}\u{e1a}\u{e31}\u{e0d}\u{e0a}\u{e35}\u{e43}\u{e2b}\u{e21}\u{e48}\u{e2b}\u{e23}\u{e37}\u{e2d}\u{e1a}\u{e31}\u{e0d}\u{e0a}\u{e35}\u{e2a}\u{e33}\u{e23}\u{e2d}\u{e07} \u{e01}\u{e23}\u{e38}\u{e13}\u{e32}\u{e43}\u{e0a}\u{e49}\u{e1a}\u{e31}\u{e0d}\u{e0a}\u{e35}\u{e2b}\u{e25}\u{e31}\u{e01}",
+	},
+	it = {
+		join_title = "Sblocca lo script",
+		join_sub = "Per sbloccare lo script devi unirti al gruppo.",
+		s1 = "Tocca Unisciti al gruppo. Il link viene copiato.",
+		s2 = "Apri il browser e incollalo.",
+		s3 = "Premi Unisciti nella pagina del gruppo. Fatto!",
+		join_btn = "Unisciti al gruppo",
+		link_copied = "Link copiato. Incollalo nel browser.",
+		copy_failed = "Impossibile copiare. Cerca \u{ab}%s\u{bb} su Roblox e unisciti.",
+		tab_join = "Sblocca",
+		tab_lang = "Lingua",
+		lang_sub = "Scegli la lingua",
+		already = "Sei gi\u{e0} nel gruppo. Grazie!",
+		check_title = "Controlla di nuovo",
+		check_sub = "Ti sei unito al gruppo? Premi qui per verificare",
+		checking = "Controllo in corso...",
+		not_in_group = "Ops, sembra che tu non sia ancora nel gruppo.",
+		verified = "Verificato! Script sbloccato.",
+		kick = "Account nuovi o secondari vietati. Usa il tuo account principale.",
+	},
+	ko = {
+		join_title = "\u{c2a4}\u{d06c}\u{b9bd}\u{d2b8} \u{c7a0}\u{ae08} \u{d574}\u{c81c}",
+		join_sub = "\u{c2a4}\u{d06c}\u{b9bd}\u{d2b8}\u{b97c} \u{d574}\u{c81c}\u{d558}\u{b824}\u{ba74} \u{adf8}\u{b8f9}\u{c5d0} \u{ac00}\u{c785}\u{d574}\u{c57c} \u{d574}\u{c694}.",
+		s1 = "\u{adf8}\u{b8f9} \u{ac00}\u{c785}\u{c744} \u{b204}\u{b974}\u{c138}\u{c694}. \u{b9c1}\u{d06c}\u{ac00} \u{bcf5}\u{c0ac}\u{b3fc}\u{c694}.",
+		s2 = "\u{be0c}\u{b77c}\u{c6b0}\u{c800}\u{b97c} \u{c5f4}\u{ace0} \u{bd99}\u{c5ec}\u{b123}\u{c73c}\u{c138}\u{c694}.",
+		s3 = "\u{adf8}\u{b8f9} \u{d398}\u{c774}\u{c9c0}\u{c5d0}\u{c11c} \u{ac00}\u{c785}\u{c744} \u{b204}\u{b974}\u{ba74} \u{b05d}!",
+		join_btn = "\u{adf8}\u{b8f9} \u{ac00}\u{c785}",
+		link_copied = "\u{b9c1}\u{d06c}\u{ac00} \u{bcf5}\u{c0ac}\u{b410}\u{c5b4}\u{c694}. \u{be0c}\u{b77c}\u{c6b0}\u{c800}\u{c5d0} \u{bd99}\u{c5ec}\u{b123}\u{c73c}\u{c138}\u{c694}.",
+		copy_failed = "\u{bcf5}\u{c0ac}\u{c5d0} \u{c2e4}\u{d328}\u{d588}\u{c5b4}\u{c694}. Roblox\u{c5d0}\u{c11c} \u{201c}%s\u{201d}\u{b97c} \u{ac80}\u{c0c9}\u{d574} \u{ac00}\u{c785}\u{d558}\u{c138}\u{c694}.",
+		tab_join = "\u{d574}\u{c81c}",
+		tab_lang = "\u{c5b8}\u{c5b4}",
+		lang_sub = "\u{c5b8}\u{c5b4}\u{b97c} \u{c120}\u{d0dd}\u{d558}\u{c138}\u{c694}",
+		already = "\u{c774}\u{bbf8} \u{adf8}\u{b8f9}\u{c5d0} \u{ac00}\u{c785}\u{b418}\u{c5b4} \u{c788}\u{c5b4}\u{c694}. \u{ac10}\u{c0ac}\u{d569}\u{b2c8}\u{b2e4}!",
+		check_title = "\u{b2e4}\u{c2dc} \u{d655}\u{c778}",
+		check_sub = "\u{adf8}\u{b8f9}\u{c5d0} \u{ac00}\u{c785}\u{d588}\u{b098}\u{c694}? \u{c5ec}\u{ae30}\u{b97c} \u{b20c}\u{b7ec} \u{d655}\u{c778}\u{d558}\u{c138}\u{c694}",
+		checking = "\u{d655}\u{c778} \u{c911}...",
+		not_in_group = "\u{c557}, \u{c544}\u{c9c1} \u{adf8}\u{b8f9}\u{c5d0} \u{ac00}\u{c785}\u{d558}\u{c9c0} \u{c54a}\u{c740} \u{ac83} \u{ac19}\u{c544}\u{c694}.",
+		verified = "\u{d655}\u{c778} \u{c644}\u{b8cc}! \u{c2a4}\u{d06c}\u{b9bd}\u{d2b8}\u{ac00} \u{d574}\u{c81c}\u{b418}\u{c5c8}\u{c5b4}\u{c694}.",
+		kick = "\u{c0c8} \u{acc4}\u{c815}\u{acfc} \u{bd80}\u{acc4}\u{c815}\u{c740} \u{c0ac}\u{c6a9}\u{d560} \u{c218} \u{c5c6}\u{c2b5}\u{b2c8}\u{b2e4}. \u{bcf8}\u{acc4}\u{c815}\u{c744} \u{c0ac}\u{c6a9}\u{d574} \u{c8fc}\u{c138}\u{c694}.",
+	},
+	ja = {
+		join_title = "\u{30b9}\u{30af}\u{30ea}\u{30d7}\u{30c8}\u{3092}\u{89e3}\u{9664}",
+		join_sub = "\u{30b9}\u{30af}\u{30ea}\u{30d7}\u{30c8}\u{3092}\u{89e3}\u{9664}\u{3059}\u{308b}\u{306b}\u{306f}\u{3001}\u{30b0}\u{30eb}\u{30fc}\u{30d7}\u{3078}\u{306e}\u{53c2}\u{52a0}\u{304c}\u{5fc5}\u{8981}\u{3067}\u{3059}\u{3002}",
+		s1 = "\u{300c}\u{30b0}\u{30eb}\u{30fc}\u{30d7}\u{306b}\u{53c2}\u{52a0}\u{300d}\u{3092}\u{30bf}\u{30c3}\u{30d7}\u{3002}\u{30ea}\u{30f3}\u{30af}\u{304c}\u{30b3}\u{30d4}\u{30fc}\u{3055}\u{308c}\u{307e}\u{3059}\u{3002}",
+		s2 = "\u{30d6}\u{30e9}\u{30a6}\u{30b6}\u{3092}\u{958b}\u{3044}\u{3066}\u{8cbc}\u{308a}\u{4ed8}\u{3051}\u{3066}\u{304f}\u{3060}\u{3055}\u{3044}\u{3002}",
+		s3 = "\u{30b0}\u{30eb}\u{30fc}\u{30d7}\u{30da}\u{30fc}\u{30b8}\u{3067}\u{300c}\u{53c2}\u{52a0}\u{300d}\u{3092}\u{62bc}\u{305b}\u{3070}\u{5b8c}\u{4e86}\u{ff01}",
+		join_btn = "\u{30b0}\u{30eb}\u{30fc}\u{30d7}\u{306b}\u{53c2}\u{52a0}",
+		link_copied = "\u{30ea}\u{30f3}\u{30af}\u{3092}\u{30b3}\u{30d4}\u{30fc}\u{3057}\u{307e}\u{3057}\u{305f}\u{3002}\u{30d6}\u{30e9}\u{30a6}\u{30b6}\u{306b}\u{8cbc}\u{308a}\u{4ed8}\u{3051}\u{3066}\u{304f}\u{3060}\u{3055}\u{3044}\u{3002}",
+		copy_failed = "\u{30b3}\u{30d4}\u{30fc}\u{3067}\u{304d}\u{307e}\u{305b}\u{3093}\u{3067}\u{3057}\u{305f}\u{3002}Roblox \u{3067}\u{300c}%s\u{300d}\u{3092}\u{691c}\u{7d22}\u{3057}\u{3066}\u{53c2}\u{52a0}\u{3057}\u{3066}\u{304f}\u{3060}\u{3055}\u{3044}\u{3002}",
+		tab_join = "\u{89e3}\u{9664}",
+		tab_lang = "\u{8a00}\u{8a9e}",
+		lang_sub = "\u{8a00}\u{8a9e}\u{3092}\u{9078}\u{629e}",
+		already = "\u{3059}\u{3067}\u{306b}\u{30b0}\u{30eb}\u{30fc}\u{30d7}\u{306b}\u{53c2}\u{52a0}\u{3057}\u{3066}\u{3044}\u{307e}\u{3059}\u{3002}\u{3042}\u{308a}\u{304c}\u{3068}\u{3046}\u{ff01}",
+		check_title = "\u{3082}\u{3046}\u{4e00}\u{5ea6}\u{78ba}\u{8a8d}",
+		check_sub = "\u{30b0}\u{30eb}\u{30fc}\u{30d7}\u{306b}\u{53c2}\u{52a0}\u{3057}\u{307e}\u{3057}\u{305f}\u{304b}\u{ff1f} \u{3053}\u{3053}\u{3092}\u{62bc}\u{3057}\u{3066}\u{78ba}\u{8a8d}",
+		checking = "\u{78ba}\u{8a8d}\u{4e2d}...",
+		not_in_group = "\u{307e}\u{3060}\u{30b0}\u{30eb}\u{30fc}\u{30d7}\u{306b}\u{53c2}\u{52a0}\u{3057}\u{3066}\u{3044}\u{306a}\u{3044}\u{3088}\u{3046}\u{3067}\u{3059}\u{3002}",
+		verified = "\u{78ba}\u{8a8d}\u{3067}\u{304d}\u{307e}\u{3057}\u{305f}\u{ff01}\u{30b9}\u{30af}\u{30ea}\u{30d7}\u{30c8}\u{3092}\u{89e3}\u{9664}\u{3057}\u{307e}\u{3057}\u{305f}\u{3002}",
+		kick = "\u{65b0}\u{898f}\u{30a2}\u{30ab}\u{30a6}\u{30f3}\u{30c8}\u{3068}\u{30b5}\u{30d6}\u{30a2}\u{30ab}\u{30a6}\u{30f3}\u{30c8}\u{306f}\u{4f7f}\u{7528}\u{4e0d}\u{53ef}\u{3067}\u{3059}\u{3002}\u{30e1}\u{30a4}\u{30f3}\u{30a2}\u{30ab}\u{30a6}\u{30f3}\u{30c8}\u{3092}\u{3054}\u{5229}\u{7528}\u{304f}\u{3060}\u{3055}\u{3044}\u{3002}",
+	},
+	zh = {
+		join_title = "\u{89e3}\u{9501}\u{811a}\u{672c}",
+		join_sub = "\u{8981}\u{89e3}\u{9501}\u{811a}\u{672c}\u{ff0c}\u{4f60}\u{9700}\u{8981}\u{52a0}\u{5165}\u{7fa4}\u{7ec4}\u{3002}",
+		s1 = "\u{70b9}\u{51fb}\u{201c}\u{52a0}\u{5165}\u{7fa4}\u{7ec4}\u{201d}\u{ff0c}\u{94fe}\u{63a5}\u{4f1a}\u{88ab}\u{590d}\u{5236}\u{3002}",
+		s2 = "\u{6253}\u{5f00}\u{6d4f}\u{89c8}\u{5668}\u{5e76}\u{7c98}\u{8d34}\u{94fe}\u{63a5}\u{3002}",
+		s3 = "\u{5728}\u{7fa4}\u{7ec4}\u{9875}\u{9762}\u{70b9}\u{51fb}\u{201c}\u{52a0}\u{5165}\u{201d}\u{ff0c}\u{5b8c}\u{6210}\u{ff01}",
+		join_btn = "\u{52a0}\u{5165}\u{7fa4}\u{7ec4}",
+		link_copied = "\u{94fe}\u{63a5}\u{5df2}\u{590d}\u{5236}\u{ff0c}\u{8bf7}\u{7c98}\u{8d34}\u{5230}\u{6d4f}\u{89c8}\u{5668}\u{4e2d}\u{3002}",
+		copy_failed = "\u{590d}\u{5236}\u{5931}\u{8d25}\u{3002}\u{8bf7}\u{5728} Roblox \u{641c}\u{7d22}\u{201c}%s\u{201d}\u{5e76}\u{52a0}\u{5165}\u{3002}",
+		tab_join = "\u{89e3}\u{9501}",
+		tab_lang = "\u{8bed}\u{8a00}",
+		lang_sub = "\u{9009}\u{62e9}\u{4f60}\u{7684}\u{8bed}\u{8a00}",
+		already = "\u{4f60}\u{5df2}\u{7ecf}\u{5728}\u{7fa4}\u{7ec4}\u{91cc}\u{4e86}\u{ff0c}\u{8c22}\u{8c22}\u{ff01}",
+		check_title = "\u{91cd}\u{65b0}\u{68c0}\u{67e5}",
+		check_sub = "\u{5df2}\u{52a0}\u{5165}\u{7fa4}\u{7ec4}\u{ff1f}\u{70b9}\u{51fb}\u{8fd9}\u{91cc}\u{9a8c}\u{8bc1}",
+		checking = "\u{68c0}\u{67e5}\u{4e2d}...",
+		not_in_group = "\u{54ce}\u{5440}\u{ff0c}\u{770b}\u{8d77}\u{6765}\u{4f60}\u{8fd8}\u{6ca1}\u{6709}\u{52a0}\u{5165}\u{7fa4}\u{7ec4}\u{3002}",
+		verified = "\u{9a8c}\u{8bc1}\u{6210}\u{529f}\u{ff01}\u{811a}\u{672c}\u{5df2}\u{89e3}\u{9501}\u{3002}",
+		kick = "\u{7981}\u{6b62}\u{4f7f}\u{7528}\u{65b0}\u{8d26}\u{53f7}\u{6216}\u{5c0f}\u{53f7}\u{ff0c}\u{8bf7}\u{4f7f}\u{7528}\u{4f60}\u{7684}\u{4e3b}\u{8d26}\u{53f7}\u{3002}",
+	},
+	zht = {
+		join_title = "\u{89e3}\u{9396}\u{8173}\u{672c}",
+		join_sub = "\u{8981}\u{89e3}\u{9396}\u{8173}\u{672c}\u{ff0c}\u{4f60}\u{9700}\u{8981}\u{52a0}\u{5165}\u{7fa4}\u{7d44}\u{3002}",
+		s1 = "\u{9ede}\u{64ca}\u{300c}\u{52a0}\u{5165}\u{7fa4}\u{7d44}\u{300d}\u{ff0c}\u{9023}\u{7d50}\u{6703}\u{88ab}\u{8907}\u{88fd}\u{3002}",
+		s2 = "\u{958b}\u{555f}\u{700f}\u{89bd}\u{5668}\u{4e26}\u{8cbc}\u{4e0a}\u{9023}\u{7d50}\u{3002}",
+		s3 = "\u{5728}\u{7fa4}\u{7d44}\u{9801}\u{9762}\u{9ede}\u{64ca}\u{300c}\u{52a0}\u{5165}\u{300d}\u{ff0c}\u{5b8c}\u{6210}\u{ff01}",
+		join_btn = "\u{52a0}\u{5165}\u{7fa4}\u{7d44}",
+		link_copied = "\u{9023}\u{7d50}\u{5df2}\u{8907}\u{88fd}\u{ff0c}\u{8acb}\u{8cbc}\u{5230}\u{700f}\u{89bd}\u{5668}\u{4e2d}\u{3002}",
+		copy_failed = "\u{8907}\u{88fd}\u{5931}\u{6557}\u{3002}\u{8acb}\u{5728} Roblox \u{641c}\u{5c0b}\u{300c}%s\u{300d}\u{4e26}\u{52a0}\u{5165}\u{3002}",
+		tab_join = "\u{89e3}\u{9396}",
+		tab_lang = "\u{8a9e}\u{8a00}",
+		lang_sub = "\u{9078}\u{64c7}\u{4f60}\u{7684}\u{8a9e}\u{8a00}",
+		already = "\u{4f60}\u{5df2}\u{7d93}\u{5728}\u{7fa4}\u{7d44}\u{88e1}\u{4e86}\u{ff0c}\u{8b1d}\u{8b1d}\u{ff01}",
+		check_title = "\u{91cd}\u{65b0}\u{6aa2}\u{67e5}",
+		check_sub = "\u{5df2}\u{52a0}\u{5165}\u{7fa4}\u{7d44}\u{ff1f}\u{9ede}\u{64ca}\u{9019}\u{88e1}\u{9a57}\u{8b49}",
+		checking = "\u{6aa2}\u{67e5}\u{4e2d}...",
+		not_in_group = "\u{54ce}\u{5440}\u{ff0c}\u{770b}\u{8d77}\u{4f86}\u{4f60}\u{9084}\u{6c92}\u{6709}\u{52a0}\u{5165}\u{7fa4}\u{7d44}\u{3002}",
+		verified = "\u{9a57}\u{8b49}\u{6210}\u{529f}\u{ff01}\u{8173}\u{672c}\u{5df2}\u{89e3}\u{9396}\u{3002}",
+		kick = "\u{7981}\u{6b62}\u{4f7f}\u{7528}\u{65b0}\u{5e33}\u{865f}\u{6216}\u{5c0f}\u{865f}\u{ff0c}\u{8acb}\u{4f7f}\u{7528}\u{4f60}\u{7684}\u{4e3b}\u{5e33}\u{865f}\u{3002}",
+	},
+	nl = {
+		join_title = "Ontgrendel het script",
+		join_sub = "Om het script te ontgrendelen moet je lid worden van de groep.",
+		s1 = "Tik op Groep joinen. De link wordt gekopieerd.",
+		s2 = "Open je browser en plak hem erin.",
+		s3 = "Tik op de groepspagina op Joinen. Klaar!",
+		join_btn = "Groep joinen",
+		link_copied = "Link gekopieerd. Plak hem in je browser.",
+		copy_failed = "Kopi\u{eb}ren mislukt. Zoek \u{201c}%s\u{201d} op Roblox en word lid.",
+		tab_join = "Ontgrendel",
+		tab_lang = "Taal",
+		lang_sub = "Kies je taal",
+		already = "Je zit al in de groep. Bedankt!",
+		check_title = "Opnieuw controleren",
+		check_sub = "Al lid geworden? Tik hier om te controleren",
+		checking = "Controleren...",
+		not_in_group = "Oeps, het lijkt erop dat je nog niet in de groep zit.",
+		verified = "Geverifieerd! Script ontgrendeld.",
+		kick = "Nieuwe of alt-accounts zijn niet toegestaan. Gebruik je hoofdaccount.",
+	},
+	uk = {
+		join_title = "\u{420}\u{43e}\u{437}\u{431}\u{43b}\u{43e}\u{43a}\u{443}\u{439} \u{441}\u{43a}\u{440}\u{438}\u{43f}\u{442}",
+		join_sub = "\u{429}\u{43e}\u{431} \u{440}\u{43e}\u{437}\u{431}\u{43b}\u{43e}\u{43a}\u{443}\u{432}\u{430}\u{442}\u{438} \u{441}\u{43a}\u{440}\u{438}\u{43f}\u{442}, \u{43f}\u{43e}\u{442}\u{440}\u{456}\u{431}\u{43d}\u{43e} \u{43f}\u{440}\u{438}\u{454}\u{434}\u{43d}\u{430}\u{442}\u{438}\u{441}\u{44f} \u{434}\u{43e} \u{433}\u{440}\u{443}\u{43f}\u{438}.",
+		s1 = "\u{41d}\u{430}\u{442}\u{438}\u{441}\u{43d}\u{438} \u{ab}\u{41f}\u{440}\u{438}\u{454}\u{434}\u{43d}\u{430}\u{442}\u{438}\u{441}\u{44f} \u{434}\u{43e} \u{433}\u{440}\u{443}\u{43f}\u{438}\u{bb}. \u{41f}\u{43e}\u{441}\u{438}\u{43b}\u{430}\u{43d}\u{43d}\u{44f} \u{441}\u{43a}\u{43e}\u{43f}\u{456}\u{44e}\u{454}\u{442}\u{44c}\u{441}\u{44f}.",
+		s2 = "\u{412}\u{456}\u{434}\u{43a}\u{440}\u{438}\u{439} \u{431}\u{440}\u{430}\u{443}\u{437}\u{435}\u{440} \u{456} \u{432}\u{441}\u{442}\u{430}\u{432} \u{439}\u{43e}\u{433}\u{43e}.",
+		s3 = "\u{41d}\u{430}\u{442}\u{438}\u{441}\u{43d}\u{438} \u{ab}\u{41f}\u{440}\u{438}\u{454}\u{434}\u{43d}\u{430}\u{442}\u{438}\u{441}\u{44f}\u{bb} \u{43d}\u{430} \u{441}\u{442}\u{43e}\u{440}\u{456}\u{43d}\u{446}\u{456} \u{433}\u{440}\u{443}\u{43f}\u{438}. \u{413}\u{43e}\u{442}\u{43e}\u{432}\u{43e}!",
+		join_btn = "\u{41f}\u{440}\u{438}\u{454}\u{434}\u{43d}\u{430}\u{442}\u{438}\u{441}\u{44f} \u{434}\u{43e} \u{433}\u{440}\u{443}\u{43f}\u{438}",
+		link_copied = "\u{41f}\u{43e}\u{441}\u{438}\u{43b}\u{430}\u{43d}\u{43d}\u{44f} \u{441}\u{43a}\u{43e}\u{43f}\u{456}\u{439}\u{43e}\u{432}\u{430}\u{43d}\u{43e}. \u{412}\u{441}\u{442}\u{430}\u{432} \u{439}\u{43e}\u{433}\u{43e} \u{432} \u{431}\u{440}\u{430}\u{443}\u{437}\u{435}\u{440}.",
+		copy_failed = "\u{41d}\u{435} \u{432}\u{434}\u{430}\u{43b}\u{43e}\u{441}\u{44f} \u{441}\u{43a}\u{43e}\u{43f}\u{456}\u{44e}\u{432}\u{430}\u{442}\u{438}. \u{417}\u{43d}\u{430}\u{439}\u{434}\u{438} \u{ab}%s\u{bb} \u{443} Roblox \u{456} \u{43f}\u{440}\u{438}\u{454}\u{434}\u{43d}\u{430}\u{439}\u{441}\u{44f}.",
+		tab_join = "\u{420}\u{43e}\u{437}\u{431}\u{43b}\u{43e}\u{43a}\u{443}\u{439}",
+		tab_lang = "\u{41c}\u{43e}\u{432}\u{430}",
+		lang_sub = "\u{41e}\u{431}\u{435}\u{440}\u{438} \u{43c}\u{43e}\u{432}\u{443}",
+		already = "\u{422}\u{438} \u{432}\u{436}\u{435} \u{432} \u{433}\u{440}\u{443}\u{43f}\u{456}. \u{414}\u{44f}\u{43a}\u{443}\u{454}\u{43c}\u{43e}!",
+		check_title = "\u{41f}\u{435}\u{440}\u{435}\u{432}\u{456}\u{440}\u{438}\u{442}\u{438} \u{449}\u{435} \u{440}\u{430}\u{437}",
+		check_sub = "\u{423}\u{436}\u{435} \u{43f}\u{440}\u{438}\u{454}\u{434}\u{43d}\u{430}\u{432}\u{441}\u{44f} \u{434}\u{43e} \u{433}\u{440}\u{443}\u{43f}\u{438}? \u{41d}\u{430}\u{442}\u{438}\u{441}\u{43d}\u{438} \u{442}\u{443}\u{442}, \u{449}\u{43e}\u{431} \u{43f}\u{435}\u{440}\u{435}\u{432}\u{456}\u{440}\u{438}\u{442}\u{438}",
+		checking = "\u{41f}\u{435}\u{440}\u{435}\u{432}\u{456}\u{440}\u{44f}\u{454}\u{43c}\u{43e}...",
+		not_in_group = "\u{41e}\u{439}, \u{441}\u{445}\u{43e}\u{436}\u{435}, \u{442}\u{438} \u{449}\u{435} \u{43d}\u{435} \u{432} \u{433}\u{440}\u{443}\u{43f}\u{456}.",
+		verified = "\u{41f}\u{435}\u{440}\u{435}\u{432}\u{456}\u{440}\u{435}\u{43d}\u{43e}! \u{421}\u{43a}\u{440}\u{438}\u{43f}\u{442} \u{440}\u{43e}\u{437}\u{431}\u{43b}\u{43e}\u{43a}\u{43e}\u{432}\u{430}\u{43d}\u{43e}.",
+		kick = "\u{41d}\u{43e}\u{432}\u{456} \u{439} \u{430}\u{43b}\u{44c}\u{442}-\u{430}\u{43a}\u{430}\u{443}\u{43d}\u{442}\u{438} \u{437}\u{430}\u{431}\u{43e}\u{440}\u{43e}\u{43d}\u{435}\u{43d}\u{456}. \u{412}\u{438}\u{43a}\u{43e}\u{440}\u{438}\u{441}\u{442}\u{43e}\u{432}\u{443}\u{439} \u{43e}\u{441}\u{43d}\u{43e}\u{432}\u{43d}\u{438}\u{439} \u{430}\u{43a}\u{430}\u{443}\u{43d}\u{442}.",
+	},
+	ro = {
+		join_title = "Deblocheaz\u{103} scriptul",
+		join_sub = "Pentru a debloca scriptul, trebuie s\u{103} te al\u{103}turi grupului.",
+		s1 = "Apas\u{103} Al\u{103}tur\u{103}-te grupului. Linkul se copiaz\u{103}.",
+		s2 = "Deschide browserul \u{219}i lipe\u{219}te-l.",
+		s3 = "Apas\u{103} Al\u{103}tur\u{103}-te pe pagina grupului. Gata!",
+		join_btn = "Al\u{103}tur\u{103}-te grupului",
+		link_copied = "Link copiat. Lipe\u{219}te-l \u{ee}n browser.",
+		copy_failed = "Nu s-a putut copia. Caut\u{103} \u{201e}%s\u{201d} pe Roblox \u{219}i al\u{103}tur\u{103}-te.",
+		tab_join = "Deblocheaz\u{103}",
+		tab_lang = "Limb\u{103}",
+		lang_sub = "Alege limba",
+		already = "E\u{219}ti deja \u{ee}n grup. Mul\u{21b}umim!",
+		check_title = "Verific\u{103} din nou",
+		check_sub = "Te-ai al\u{103}turat grupului? Apas\u{103} aici pentru a verifica",
+		checking = "Se verific\u{103}...",
+		not_in_group = "Hopa, se pare c\u{103} nu e\u{219}ti \u{ee}nc\u{103} \u{ee}n grup.",
+		verified = "Verificat! Script deblocat.",
+		kick = "Conturile noi/alt sunt interzise. Folose\u{219}te contul principal.",
+	},
+	hi = {
+		join_title = "\u{938}\u{94d}\u{915}\u{94d}\u{930}\u{93f}\u{92a}\u{94d}\u{91f} \u{905}\u{928}\u{932}\u{949}\u{915} \u{915}\u{930}\u{947}\u{902}",
+		join_sub = "\u{938}\u{94d}\u{915}\u{94d}\u{930}\u{93f}\u{92a}\u{94d}\u{91f} \u{905}\u{928}\u{932}\u{949}\u{915} \u{915}\u{930}\u{928}\u{947} \u{915}\u{947} \u{932}\u{93f}\u{90f} \u{906}\u{92a}\u{915}\u{94b} \u{917}\u{94d}\u{930}\u{941}\u{92a} \u{91c}\u{949}\u{907}\u{928} \u{915}\u{930}\u{928}\u{93e} \u{939}\u{94b}\u{917}\u{93e}\u{964}",
+		s1 = "\u{917}\u{94d}\u{930}\u{941}\u{92a} \u{91c}\u{949}\u{907}\u{928} \u{915}\u{930}\u{947}\u{902} \u{926}\u{92c}\u{93e}\u{90f}\u{901}\u{964} \u{932}\u{93f}\u{902}\u{915} \u{915}\u{949}\u{92a}\u{940} \u{939}\u{94b} \u{91c}\u{93e}\u{90f}\u{917}\u{93e}\u{964}",
+		s2 = "\u{92c}\u{94d}\u{930}\u{93e}\u{909}\u{91c}\u{93c}\u{930} \u{916}\u{94b}\u{932}\u{947}\u{902} \u{914}\u{930} \u{909}\u{938}\u{947} \u{92a}\u{947}\u{938}\u{94d}\u{91f} \u{915}\u{930}\u{947}\u{902}\u{964}",
+		s3 = "\u{917}\u{94d}\u{930}\u{941}\u{92a} \u{92a}\u{947}\u{91c} \u{92a}\u{930} \u{91c}\u{949}\u{907}\u{928} \u{926}\u{92c}\u{93e}\u{90f}\u{901}\u{964} \u{939}\u{94b} \u{917}\u{92f}\u{93e}!",
+		join_btn = "\u{917}\u{94d}\u{930}\u{941}\u{92a} \u{91c}\u{949}\u{907}\u{928} \u{915}\u{930}\u{947}\u{902}",
+		link_copied = "\u{932}\u{93f}\u{902}\u{915} \u{915}\u{949}\u{92a}\u{940} \u{939}\u{94b} \u{917}\u{92f}\u{93e}\u{964} \u{92c}\u{94d}\u{930}\u{93e}\u{909}\u{91c}\u{93c}\u{930} \u{92e}\u{947}\u{902} \u{92a}\u{947}\u{938}\u{94d}\u{91f} \u{915}\u{930}\u{947}\u{902}\u{964}",
+		copy_failed = "\u{915}\u{949}\u{92a}\u{940} \u{928}\u{939}\u{940}\u{902} \u{939}\u{94b} \u{938}\u{915}\u{93e}\u{964} Roblox \u{92a}\u{930} \u{201c}%s\u{201d} \u{916}\u{94b}\u{91c}\u{947}\u{902} \u{914}\u{930} \u{91c}\u{941}\u{921}\u{93c}\u{947}\u{902}\u{964}",
+		tab_join = "\u{905}\u{928}\u{932}\u{949}\u{915}",
+		tab_lang = "\u{92d}\u{93e}\u{937}\u{93e}",
+		lang_sub = "\u{905}\u{92a}\u{928}\u{940} \u{92d}\u{93e}\u{937}\u{93e} \u{91a}\u{941}\u{928}\u{947}\u{902}",
+		already = "\u{906}\u{92a} \u{92a}\u{939}\u{932}\u{947} \u{938}\u{947} \u{917}\u{94d}\u{930}\u{941}\u{92a} \u{92e}\u{947}\u{902} \u{939}\u{948}\u{902}\u{964} \u{927}\u{928}\u{94d}\u{92f}\u{935}\u{93e}\u{926}!",
+		check_title = "\u{92b}\u{93f}\u{930} \u{938}\u{947} \u{91c}\u{93e}\u{901}\u{91a}\u{947}\u{902}",
+		check_sub = "\u{917}\u{94d}\u{930}\u{941}\u{92a} \u{91c}\u{949}\u{907}\u{928} \u{915}\u{930} \u{932}\u{93f}\u{92f}\u{93e}? \u{938}\u{924}\u{94d}\u{92f}\u{93e}\u{92a}\u{93f}\u{924} \u{915}\u{930}\u{928}\u{947} \u{915}\u{947} \u{932}\u{93f}\u{90f} \u{92f}\u{939}\u{93e}\u{901} \u{926}\u{92c}\u{93e}\u{90f}\u{901}",
+		checking = "\u{91c}\u{93e}\u{901}\u{91a} \u{939}\u{94b} \u{930}\u{939}\u{940} \u{939}\u{948}...",
+		not_in_group = "\u{913}\u{939}, \u{932}\u{917}\u{924}\u{93e} \u{939}\u{948} \u{906}\u{92a} \u{905}\u{92d}\u{940} \u{917}\u{94d}\u{930}\u{941}\u{92a} \u{92e}\u{947}\u{902} \u{928}\u{939}\u{940}\u{902} \u{939}\u{948}\u{902}\u{964}",
+		verified = "\u{938}\u{924}\u{94d}\u{92f}\u{93e}\u{92a}\u{93f}\u{924}! \u{938}\u{94d}\u{915}\u{94d}\u{930}\u{93f}\u{92a}\u{94d}\u{91f} \u{905}\u{928}\u{932}\u{949}\u{915} \u{939}\u{94b} \u{917}\u{908}\u{964}",
+		kick = "\u{928}\u{90f} \u{92f}\u{93e} \u{911}\u{932}\u{94d}\u{91f} \u{905}\u{915}\u{93e}\u{909}\u{902}\u{91f} \u{915}\u{940} \u{905}\u{928}\u{941}\u{92e}\u{924}\u{93f} \u{928}\u{939}\u{940}\u{902} \u{939}\u{948}\u{964} \u{905}\u{92a}\u{928}\u{93e} \u{92e}\u{941}\u{916}\u{94d}\u{92f} \u{905}\u{915}\u{93e}\u{909}\u{902}\u{91f} \u{907}\u{938}\u{94d}\u{924}\u{947}\u{92e}\u{93e}\u{932} \u{915}\u{930}\u{947}\u{902}\u{964}",
+	},
+	ms = {
+		join_title = "Buka kunci skrip",
+		join_sub = "Untuk membuka kunci skrip, anda perlu menyertai kumpulan.",
+		s1 = "Tekan Sertai Kumpulan. Pautan akan disalin.",
+		s2 = "Buka pelayar dan tampal pautan itu.",
+		s3 = "Tekan Sertai di halaman kumpulan. Siap!",
+		join_btn = "Sertai Kumpulan",
+		link_copied = "Pautan disalin. Tampal di pelayar.",
+		copy_failed = "Gagal menyalin. Cari \u{201c}%s\u{201d} di Roblox dan sertai.",
+		tab_join = "Buka kunci",
+		tab_lang = "Bahasa",
+		lang_sub = "Pilih bahasa anda",
+		already = "Anda sudah dalam kumpulan. Terima kasih!",
+		check_title = "Semak Semula",
+		check_sub = "Sudah sertai kumpulan? Tekan di sini untuk mengesahkan",
+		checking = "Menyemak...",
+		not_in_group = "Alamak, nampaknya anda belum berada dalam kumpulan.",
+		verified = "Disahkan! Skrip dibuka kunci.",
+		kick = "Akaun baharu atau alt tidak dibenarkan. Guna akaun utama anda.",
+	},
+	he = {
+		join_title = "\u{5e4}\u{5ea}\u{5d7} \u{5d0}\u{5ea} \u{5d4}\u{5e1}\u{5e7}\u{5e8}\u{5d9}\u{5e4}\u{5d8}",
+		join_sub = "\u{5db}\u{5d3}\u{5d9} \u{5dc}\u{5e4}\u{5ea}\u{5d5}\u{5d7} \u{5d0}\u{5ea} \u{5d4}\u{5e1}\u{5e7}\u{5e8}\u{5d9}\u{5e4}\u{5d8}, \u{5e2}\u{5dc}\u{5d9}\u{5da} \u{5dc}\u{5d4}\u{5e6}\u{5d8}\u{5e8}\u{5e3} \u{5dc}\u{5e7}\u{5d1}\u{5d5}\u{5e6}\u{5d4}.",
+		s1 = "\u{5dc}\u{5d7}\u{5e5} \u{5e2}\u{5dc} \u{201c}\u{5d4}\u{5e6}\u{5d8}\u{5e8}\u{5e3} \u{5dc}\u{5e7}\u{5d1}\u{5d5}\u{5e6}\u{5d4}\u{201d}. \u{5d4}\u{5e7}\u{5d9}\u{5e9}\u{5d5}\u{5e8} \u{5d9}\u{5d5}\u{5e2}\u{5ea}\u{5e7}.",
+		s2 = "\u{5e4}\u{5ea}\u{5d7} \u{5d0}\u{5ea} \u{5d4}\u{5d3}\u{5e4}\u{5d3}\u{5e4}\u{5df} \u{5d5}\u{5d4}\u{5d3}\u{5d1}\u{5e7} \u{5d0}\u{5d5}\u{5ea}\u{5d5}.",
+		s3 = "\u{5dc}\u{5d7}\u{5e5} \u{5e2}\u{5dc} \u{201c}\u{5d4}\u{5e6}\u{5d8}\u{5e8}\u{5e3}\u{201d} \u{5d1}\u{5d3}\u{5e3} \u{5d4}\u{5e7}\u{5d1}\u{5d5}\u{5e6}\u{5d4}. \u{5e1}\u{5d9}\u{5d9}\u{5de}\u{5ea}!",
+		join_btn = "\u{5d4}\u{5e6}\u{5d8}\u{5e8}\u{5e3} \u{5dc}\u{5e7}\u{5d1}\u{5d5}\u{5e6}\u{5d4}",
+		link_copied = "\u{5d4}\u{5e7}\u{5d9}\u{5e9}\u{5d5}\u{5e8} \u{5d4}\u{5d5}\u{5e2}\u{5ea}\u{5e7}. \u{5d4}\u{5d3}\u{5d1}\u{5e7} \u{5d0}\u{5d5}\u{5ea}\u{5d5} \u{5d1}\u{5d3}\u{5e4}\u{5d3}\u{5e4}\u{5df}.",
+		copy_failed = "\u{5d4}\u{5d4}\u{5e2}\u{5ea}\u{5e7}\u{5d4} \u{5e0}\u{5db}\u{5e9}\u{5dc}\u{5d4}. \u{5d7}\u{5e4}\u{5e9} \u{201c}%s\u{201d} \u{5d1}-Roblox \u{5d5}\u{5d4}\u{5e6}\u{5d8}\u{5e8}\u{5e3}.",
+		tab_join = "\u{5e4}\u{5ea}\u{5d9}\u{5d7}\u{5d4}",
+		tab_lang = "\u{5e9}\u{5e4}\u{5d4}",
+		lang_sub = "\u{5d1}\u{5d7}\u{5e8} \u{5e9}\u{5e4}\u{5d4}",
+		already = "\u{5d0}\u{5ea}\u{5d4} \u{5db}\u{5d1}\u{5e8} \u{5d1}\u{5e7}\u{5d1}\u{5d5}\u{5e6}\u{5d4}. \u{5ea}\u{5d5}\u{5d3}\u{5d4}!",
+		check_title = "\u{5d1}\u{5d3}\u{5d5}\u{5e7} \u{5e9}\u{5d5}\u{5d1}",
+		check_sub = "\u{5d4}\u{5e6}\u{5d8}\u{5e8}\u{5e4}\u{5ea} \u{5dc}\u{5e7}\u{5d1}\u{5d5}\u{5e6}\u{5d4}? \u{5dc}\u{5d7}\u{5e5} \u{5db}\u{5d0}\u{5df} \u{5dc}\u{5d0}\u{5d9}\u{5de}\u{5d5}\u{5ea}",
+		checking = "\u{5d1}\u{5d5}\u{5d3}\u{5e7}...",
+		not_in_group = "\u{5d0}\u{5d5}\u{5e4}\u{5e1}, \u{5e0}\u{5e8}\u{5d0}\u{5d4} \u{5e9}\u{5e2}\u{5d3}\u{5d9}\u{5d9}\u{5df} \u{5d0}\u{5d9}\u{5e0}\u{5da} \u{5d1}\u{5e7}\u{5d1}\u{5d5}\u{5e6}\u{5d4}.",
+		verified = "\u{5d0}\u{5d5}\u{5de}\u{5ea}! \u{5d4}\u{5e1}\u{5e7}\u{5e8}\u{5d9}\u{5e4}\u{5d8} \u{5e0}\u{5e4}\u{5ea}\u{5d7}.",
+		kick = "\u{5d7}\u{5e9}\u{5d1}\u{5d5}\u{5e0}\u{5d5}\u{5ea} \u{5d7}\u{5d3}\u{5e9}\u{5d9}\u{5dd} \u{5d0}\u{5d5} \u{5de}\u{5e9}\u{5e0}\u{5d9}\u{5d9}\u{5dd} \u{5d0}\u{5e1}\u{5d5}\u{5e8}\u{5d9}\u{5dd}. \u{5d4}\u{5e9}\u{5ea}\u{5de}\u{5e9} \u{5d1}\u{5d7}\u{5e9}\u{5d1}\u{5d5}\u{5df} \u{5d4}\u{5e8}\u{5d0}\u{5e9}\u{5d9} \u{5e9}\u{5dc}\u{5da}.",
+	},
+	fa = {
+		join_title = "\u{627}\u{633}\u{6a9}\u{631}\u{6cc}\u{67e}\u{62a} \u{631}\u{627} \u{628}\u{627}\u{632} \u{6a9}\u{646}",
+		join_sub = "\u{628}\u{631}\u{627}\u{6cc} \u{628}\u{627}\u{632} \u{6a9}\u{631}\u{62f}\u{646} \u{627}\u{633}\u{6a9}\u{631}\u{6cc}\u{67e}\u{62a} \u{628}\u{627}\u{6cc}\u{62f} \u{628}\u{647} \u{6af}\u{631}\u{648}\u{647} \u{628}\u{67e}\u{6cc}\u{648}\u{646}\u{62f}\u{6cc}.",
+		s1 = "\u{631}\u{648}\u{6cc} \u{ab}\u{67e}\u{6cc}\u{648}\u{633}\u{62a}\u{646} \u{628}\u{647} \u{6af}\u{631}\u{648}\u{647}\u{bb} \u{628}\u{632}\u{646}. \u{644}\u{6cc}\u{646}\u{6a9} \u{6a9}\u{67e}\u{6cc} \u{645}\u{6cc}\u{200c}\u{634}\u{648}\u{62f}.",
+		s2 = "\u{645}\u{631}\u{648}\u{631}\u{6af}\u{631} \u{631}\u{627} \u{628}\u{627}\u{632} \u{6a9}\u{646} \u{648} \u{644}\u{6cc}\u{646}\u{6a9} \u{631}\u{627} \u{62c}\u{627}\u{6cc}\u{200c}\u{6af}\u{630}\u{627}\u{631}\u{6cc} \u{6a9}\u{646}.",
+		s3 = "\u{62f}\u{631} \u{635}\u{641}\u{62d}\u{647} \u{6af}\u{631}\u{648}\u{647} \u{631}\u{648}\u{6cc} \u{ab}\u{67e}\u{6cc}\u{648}\u{633}\u{62a}\u{646}\u{bb} \u{628}\u{632}\u{646}. \u{62a}\u{645}\u{627}\u{645}!",
+		join_btn = "\u{67e}\u{6cc}\u{648}\u{633}\u{62a}\u{646} \u{628}\u{647} \u{6af}\u{631}\u{648}\u{647}",
+		link_copied = "\u{644}\u{6cc}\u{646}\u{6a9} \u{6a9}\u{67e}\u{6cc} \u{634}\u{62f}. \u{622}\u{646} \u{631}\u{627} \u{62f}\u{631} \u{645}\u{631}\u{648}\u{631}\u{6af}\u{631} \u{62c}\u{627}\u{6cc}\u{200c}\u{6af}\u{630}\u{627}\u{631}\u{6cc} \u{6a9}\u{646}.",
+		copy_failed = "\u{6a9}\u{67e}\u{6cc} \u{646}\u{634}\u{62f}. \u{ab}%s\u{bb} \u{631}\u{627} \u{62f}\u{631} Roblox \u{62c}\u{633}\u{62a}\u{200c}\u{648}\u{62c}\u{648} \u{6a9}\u{646} \u{648} \u{628}\u{67e}\u{6cc}\u{648}\u{646}\u{62f}.",
+		tab_join = "\u{628}\u{627}\u{632}\u{6a9}\u{631}\u{62f}\u{646}",
+		tab_lang = "\u{632}\u{628}\u{627}\u{646}",
+		lang_sub = "\u{632}\u{628}\u{627}\u{646}\u{62a} \u{631}\u{627} \u{627}\u{646}\u{62a}\u{62e}\u{627}\u{628} \u{6a9}\u{646}",
+		already = "\u{62a}\u{648} \u{627}\u{632} \u{642}\u{628}\u{644} \u{62f}\u{631} \u{6af}\u{631}\u{648}\u{647} \u{647}\u{633}\u{62a}\u{6cc}. \u{645}\u{645}\u{646}\u{648}\u{646}!",
+		check_title = "\u{628}\u{631}\u{631}\u{633}\u{6cc} \u{62f}\u{648}\u{628}\u{627}\u{631}\u{647}",
+		check_sub = "\u{628}\u{647} \u{6af}\u{631}\u{648}\u{647} \u{67e}\u{6cc}\u{648}\u{633}\u{62a}\u{6cc}\u{61f} \u{628}\u{631}\u{627}\u{6cc} \u{62a}\u{623}\u{6cc}\u{6cc}\u{62f} \u{627}\u{6cc}\u{646}\u{62c}\u{627} \u{628}\u{632}\u{646}",
+		checking = "\u{62f}\u{631} \u{62d}\u{627}\u{644} \u{628}\u{631}\u{631}\u{633}\u{6cc}...",
+		not_in_group = "\u{627}\u{648}\u{647}\u{60c} \u{628}\u{647} \u{646}\u{638}\u{631} \u{645}\u{6cc}\u{200c}\u{631}\u{633}\u{62f} \u{647}\u{646}\u{648}\u{632} \u{62f}\u{631} \u{6af}\u{631}\u{648}\u{647} \u{646}\u{6cc}\u{633}\u{62a}\u{6cc}.",
+		verified = "\u{62a}\u{623}\u{6cc}\u{6cc}\u{62f} \u{634}\u{62f}! \u{627}\u{633}\u{6a9}\u{631}\u{6cc}\u{67e}\u{62a} \u{628}\u{627}\u{632} \u{634}\u{62f}.",
+		kick = "\u{62d}\u{633}\u{627}\u{628}\u{200c}\u{647}\u{627}\u{6cc} \u{62c}\u{62f}\u{6cc}\u{62f} \u{6cc}\u{627} \u{62c}\u{627}\u{646}\u{628}\u{6cc} \u{645}\u{645}\u{646}\u{648}\u{639} \u{627}\u{633}\u{62a}. \u{627}\u{632} \u{62d}\u{633}\u{627}\u{628} \u{627}\u{635}\u{644}\u{6cc} \u{62e}\u{648}\u{62f} \u{627}\u{633}\u{62a}\u{641}\u{627}\u{62f}\u{647} \u{6a9}\u{646}\u{6cc}\u{62f}.",
+	},
+	ur = {
+		join_title = "\u{627}\u{633}\u{6a9}\u{631}\u{67e}\u{679} \u{627}\u{646} \u{644}\u{627}\u{6a9} \u{6a9}\u{631}\u{6cc}\u{6ba}",
+		join_sub = "\u{627}\u{633}\u{6a9}\u{631}\u{67e}\u{679} \u{627}\u{646} \u{644}\u{627}\u{6a9} \u{6a9}\u{631}\u{646}\u{6d2} \u{6a9}\u{6d2} \u{644}\u{6cc}\u{6d2} \u{622}\u{67e} \u{6a9}\u{648} \u{6af}\u{631}\u{648}\u{67e} \u{62c}\u{648}\u{627}\u{626}\u{646} \u{6a9}\u{631}\u{646}\u{627} \u{6c1}\u{648}\u{6af}\u{627}\u{6d4}",
+		s1 = "\u{ab}\u{6af}\u{631}\u{648}\u{67e} \u{62c}\u{648}\u{627}\u{626}\u{646} \u{6a9}\u{631}\u{6cc}\u{6ba}\u{bb} \u{62f}\u{628}\u{627}\u{626}\u{6cc}\u{6ba}\u{6d4} \u{644}\u{646}\u{6a9} \u{6a9}\u{627}\u{67e}\u{6cc} \u{6c1}\u{648} \u{62c}\u{627}\u{626}\u{6d2} \u{6af}\u{627}\u{6d4}",
+		s2 = "\u{628}\u{631}\u{627}\u{624}\u{632}\u{631} \u{6a9}\u{6be}\u{648}\u{644}\u{6cc}\u{6ba} \u{627}\u{648}\u{631} \u{627}\u{633}\u{6d2} \u{67e}\u{6cc}\u{633}\u{679} \u{6a9}\u{631}\u{6cc}\u{6ba}\u{6d4}",
+		s3 = "\u{6af}\u{631}\u{648}\u{67e} \u{67e}\u{6cc}\u{62c} \u{67e}\u{631} \u{ab}\u{62c}\u{648}\u{627}\u{626}\u{646}\u{bb} \u{62f}\u{628}\u{627}\u{626}\u{6cc}\u{6ba}\u{6d4} \u{6c1}\u{648} \u{6af}\u{6cc}\u{627}!",
+		join_btn = "\u{6af}\u{631}\u{648}\u{67e} \u{62c}\u{648}\u{627}\u{626}\u{646} \u{6a9}\u{631}\u{6cc}\u{6ba}",
+		link_copied = "\u{644}\u{646}\u{6a9} \u{6a9}\u{627}\u{67e}\u{6cc} \u{6c1}\u{648} \u{6af}\u{6cc}\u{627}\u{6d4} \u{627}\u{633}\u{6d2} \u{628}\u{631}\u{627}\u{624}\u{632}\u{631} \u{645}\u{6cc}\u{6ba} \u{67e}\u{6cc}\u{633}\u{679} \u{6a9}\u{631}\u{6cc}\u{6ba}\u{6d4}",
+		copy_failed = "\u{6a9}\u{627}\u{67e}\u{6cc} \u{646}\u{6c1}\u{6cc}\u{6ba} \u{6c1}\u{648} \u{633}\u{6a9}\u{627}\u{6d4} Roblox \u{67e}\u{631} \u{ab}%s\u{bb} \u{62a}\u{644}\u{627}\u{634} \u{6a9}\u{631}\u{6cc}\u{6ba} \u{627}\u{648}\u{631} \u{62c}\u{648}\u{627}\u{626}\u{646} \u{6a9}\u{631}\u{6cc}\u{6ba}\u{6d4}",
+		tab_join = "\u{627}\u{646} \u{644}\u{627}\u{6a9}",
+		tab_lang = "\u{632}\u{628}\u{627}\u{646}",
+		lang_sub = "\u{627}\u{67e}\u{646}\u{6cc} \u{632}\u{628}\u{627}\u{646} \u{645}\u{646}\u{62a}\u{62e}\u{628} \u{6a9}\u{631}\u{6cc}\u{6ba}",
+		already = "\u{622}\u{67e} \u{67e}\u{6c1}\u{644}\u{6d2} \u{633}\u{6d2} \u{6af}\u{631}\u{648}\u{67e} \u{645}\u{6cc}\u{6ba} \u{6c1}\u{6cc}\u{6ba}\u{6d4} \u{634}\u{6a9}\u{631}\u{6cc}\u{6c1}!",
+		check_title = "\u{62f}\u{648}\u{628}\u{627}\u{631}\u{6c1} \u{686}\u{6cc}\u{6a9} \u{6a9}\u{631}\u{6cc}\u{6ba}",
+		check_sub = "\u{6af}\u{631}\u{648}\u{67e} \u{62c}\u{648}\u{627}\u{626}\u{646} \u{6a9}\u{631} \u{644}\u{6cc}\u{627}\u{61f} \u{62a}\u{635}\u{62f}\u{6cc}\u{642} \u{6a9}\u{6d2} \u{644}\u{6cc}\u{6d2} \u{6cc}\u{6c1}\u{627}\u{6ba} \u{62f}\u{628}\u{627}\u{626}\u{6cc}\u{6ba}",
+		checking = "\u{686}\u{6cc}\u{6a9} \u{6c1}\u{648} \u{631}\u{6c1}\u{627} \u{6c1}\u{6d2}...",
+		not_in_group = "\u{627}\u{648}\u{6c1}\u{60c} \u{644}\u{6af}\u{62a}\u{627} \u{6c1}\u{6d2} \u{622}\u{67e} \u{627}\u{628}\u{6be}\u{6cc} \u{6af}\u{631}\u{648}\u{67e} \u{645}\u{6cc}\u{6ba} \u{646}\u{6c1}\u{6cc}\u{6ba} \u{6c1}\u{6cc}\u{6ba}\u{6d4}",
+		verified = "\u{62a}\u{635}\u{62f}\u{6cc}\u{642} \u{6c1}\u{648} \u{6af}\u{626}\u{6cc}! \u{627}\u{633}\u{6a9}\u{631}\u{67e}\u{679} \u{627}\u{646} \u{644}\u{627}\u{6a9} \u{6c1}\u{648} \u{6af}\u{6cc}\u{627}\u{6d4}",
+		kick = "\u{646}\u{626}\u{6d2} \u{6cc}\u{627} \u{645}\u{62a}\u{628}\u{627}\u{62f}\u{644} \u{627}\u{6a9}\u{627}\u{624}\u{646}\u{679}\u{633} \u{6a9}\u{6cc} \u{627}\u{62c}\u{627}\u{632}\u{62a} \u{646}\u{6c1}\u{6cc}\u{6ba}\u{6d4} \u{627}\u{67e}\u{646}\u{627} \u{645}\u{6cc}\u{646} \u{627}\u{6a9}\u{627}\u{624}\u{646}\u{679} \u{627}\u{633}\u{62a}\u{639}\u{645}\u{627}\u{644} \u{6a9}\u{631}\u{6cc}\u{6ba}\u{6d4}",
+	},
+	bn = {
+		join_title = "\u{9b8}\u{9cd}\u{995}\u{9cd}\u{9b0}\u{9bf}\u{9aa}\u{9cd}\u{99f} \u{986}\u{9a8}\u{9b2}\u{995} \u{995}\u{9b0}\u{9c1}\u{9a8}",
+		join_sub = "\u{9b8}\u{9cd}\u{995}\u{9cd}\u{9b0}\u{9bf}\u{9aa}\u{9cd}\u{99f} \u{986}\u{9a8}\u{9b2}\u{995} \u{995}\u{9b0}\u{9a4}\u{9c7} \u{986}\u{9aa}\u{9a8}\u{9be}\u{995}\u{9c7} \u{997}\u{9cd}\u{9b0}\u{9c1}\u{9aa}\u{9c7} \u{9af}\u{9cb}\u{997} \u{9a6}\u{9bf}\u{9a4}\u{9c7} \u{9b9}\u{9ac}\u{9c7}\u{964}",
+		s1 = "\u{997}\u{9cd}\u{9b0}\u{9c1}\u{9aa}\u{9c7} \u{9af}\u{9cb}\u{997} \u{9a6}\u{9bf}\u{9a8} \u{99a}\u{9be}\u{9aa}\u{9c1}\u{9a8}\u{964} \u{9b2}\u{9bf}\u{999}\u{9cd}\u{995} \u{995}\u{9aa}\u{9bf} \u{9b9}\u{9af}\u{9bc}\u{9c7} \u{9af}\u{9be}\u{9ac}\u{9c7}\u{964}",
+		s2 = "\u{9ac}\u{9cd}\u{9b0}\u{9be}\u{989}\u{99c}\u{9be}\u{9b0} \u{996}\u{9c1}\u{9b2}\u{9c7} \u{9b8}\u{9c7}\u{99f}\u{9bf} \u{9aa}\u{9c7}\u{9b8}\u{9cd}\u{99f} \u{995}\u{9b0}\u{9c1}\u{9a8}\u{964}",
+		s3 = "\u{997}\u{9cd}\u{9b0}\u{9c1}\u{9aa} \u{9aa}\u{9c7}\u{99c}\u{9c7} \u{9af}\u{9cb}\u{997} \u{9a6}\u{9bf}\u{9a8} \u{99a}\u{9be}\u{9aa}\u{9c1}\u{9a8}\u{964} \u{9b9}\u{9af}\u{9bc}\u{9c7} \u{997}\u{9c7}\u{99b}\u{9c7}!",
+		join_btn = "\u{997}\u{9cd}\u{9b0}\u{9c1}\u{9aa}\u{9c7} \u{9af}\u{9cb}\u{997} \u{9a6}\u{9bf}\u{9a8}",
+		link_copied = "\u{9b2}\u{9bf}\u{999}\u{9cd}\u{995} \u{995}\u{9aa}\u{9bf} \u{9b9}\u{9af}\u{9bc}\u{9c7}\u{99b}\u{9c7}\u{964} \u{9ac}\u{9cd}\u{9b0}\u{9be}\u{989}\u{99c}\u{9be}\u{9b0}\u{9c7} \u{9aa}\u{9c7}\u{9b8}\u{9cd}\u{99f} \u{995}\u{9b0}\u{9c1}\u{9a8}\u{964}",
+		copy_failed = "\u{995}\u{9aa}\u{9bf} \u{995}\u{9b0}\u{9be} \u{9af}\u{9be}\u{9af}\u{9bc}\u{9a8}\u{9bf}\u{964} Roblox-\u{98f} \u{201c}%s\u{201d} \u{9b8}\u{9be}\u{9b0}\u{9cd}\u{99a} \u{995}\u{9b0}\u{9c7} \u{9af}\u{9cb}\u{997} \u{9a6}\u{9bf}\u{9a8}\u{964}",
+		tab_join = "\u{986}\u{9a8}\u{9b2}\u{995}",
+		tab_lang = "\u{9ad}\u{9be}\u{9b7}\u{9be}",
+		lang_sub = "\u{986}\u{9aa}\u{9a8}\u{9be}\u{9b0} \u{9ad}\u{9be}\u{9b7}\u{9be} \u{9ac}\u{9c7}\u{99b}\u{9c7} \u{9a8}\u{9bf}\u{9a8}",
+		already = "\u{986}\u{9aa}\u{9a8}\u{9bf} \u{987}\u{9a4}\u{9bf}\u{9ae}\u{9a7}\u{9cd}\u{9af}\u{9c7} \u{997}\u{9cd}\u{9b0}\u{9c1}\u{9aa}\u{9c7} \u{986}\u{99b}\u{9c7}\u{9a8}\u{964} \u{9a7}\u{9a8}\u{9cd}\u{9af}\u{9ac}\u{9be}\u{9a6}!",
+		check_title = "\u{986}\u{9ac}\u{9be}\u{9b0} \u{9af}\u{9be}\u{99a}\u{9be}\u{987} \u{995}\u{9b0}\u{9c1}\u{9a8}",
+		check_sub = "\u{997}\u{9cd}\u{9b0}\u{9c1}\u{9aa}\u{9c7} \u{9af}\u{9cb}\u{997} \u{9a6}\u{9bf}\u{9af}\u{9bc}\u{9c7}\u{99b}\u{9c7}\u{9a8}? \u{9af}\u{9be}\u{99a}\u{9be}\u{987} \u{995}\u{9b0}\u{9a4}\u{9c7} \u{98f}\u{996}\u{9be}\u{9a8}\u{9c7} \u{99a}\u{9be}\u{9aa}\u{9c1}\u{9a8}",
+		checking = "\u{9af}\u{9be}\u{99a}\u{9be}\u{987} \u{995}\u{9b0}\u{9be} \u{9b9}\u{99a}\u{9cd}\u{99b}\u{9c7}...",
+		not_in_group = "\u{993}\u{9b9}\u{9cb}, \u{9ae}\u{9a8}\u{9c7} \u{9b9}\u{99a}\u{9cd}\u{99b}\u{9c7} \u{986}\u{9aa}\u{9a8}\u{9bf} \u{98f}\u{996}\u{9a8}\u{9cb} \u{997}\u{9cd}\u{9b0}\u{9c1}\u{9aa}\u{9c7} \u{9a8}\u{9c7}\u{987}\u{964}",
+		verified = "\u{9af}\u{9be}\u{99a}\u{9be}\u{987} \u{9b9}\u{9af}\u{9bc}\u{9c7}\u{99b}\u{9c7}! \u{9b8}\u{9cd}\u{995}\u{9cd}\u{9b0}\u{9bf}\u{9aa}\u{9cd}\u{99f} \u{986}\u{9a8}\u{9b2}\u{995} \u{9b9}\u{9af}\u{9bc}\u{9c7}\u{99b}\u{9c7}\u{964}",
+		kick = "\u{9a8}\u{9a4}\u{9c1}\u{9a8} \u{9ac}\u{9be} \u{985}\u{9b2}\u{9cd}\u{99f} \u{985}\u{9cd}\u{9af}\u{9be}\u{995}\u{9be}\u{989}\u{9a8}\u{9cd}\u{99f} \u{9a8}\u{9bf}\u{9b7}\u{9bf}\u{9a6}\u{9cd}\u{9a7}\u{964} \u{986}\u{9aa}\u{9a8}\u{9be}\u{9b0} \u{9ae}\u{9c2}\u{9b2} \u{985}\u{9cd}\u{9af}\u{9be}\u{995}\u{9be}\u{989}\u{9a8}\u{9cd}\u{99f} \u{9ac}\u{9cd}\u{9af}\u{9ac}\u{9b9}\u{9be}\u{9b0} \u{995}\u{9b0}\u{9c1}\u{9a8}\u{964}",
+	},
+	sv = {
+		join_title = "L\u{e5}s upp skriptet",
+		join_sub = "F\u{f6}r att l\u{e5}sa upp skriptet m\u{e5}ste du g\u{e5} med i gruppen.",
+		s1 = "Tryck p\u{e5} G\u{e5} med i gruppen. L\u{e4}nken kopieras.",
+		s2 = "\u{d6}ppna webbl\u{e4}saren och klistra in den.",
+		s3 = "Tryck p\u{e5} G\u{e5} med p\u{e5} gruppsidan. Klart!",
+		join_btn = "G\u{e5} med i gruppen",
+		link_copied = "L\u{e4}nken kopierad. Klistra in den i webbl\u{e4}saren.",
+		copy_failed = "Kunde inte kopiera. S\u{f6}k efter \u{201d}%s\u{201d} p\u{e5} Roblox och g\u{e5} med.",
+		tab_join = "L\u{e5}s upp",
+		tab_lang = "Spr\u{e5}k",
+		lang_sub = "V\u{e4}lj ditt spr\u{e5}k",
+		already = "Du \u{e4}r redan med i gruppen. Tack!",
+		check_title = "Kontrollera igen",
+		check_sub = "Har du g\u{e5}tt med i gruppen? Tryck h\u{e4}r f\u{f6}r att verifiera",
+		checking = "Kontrollerar...",
+		not_in_group = "Hoppsan, det ser ut som att du inte \u{e4}r med i gruppen \u{e4}n.",
+		verified = "Verifierat! Skriptet \u{e4}r uppl\u{e5}st.",
+		kick = "Nya konton och alt-konton \u{e4}r f\u{f6}rbjudna. Anv\u{e4}nd ditt huvudkonto.",
+	},
+	no = {
+		join_title = "L\u{e5}s opp skriptet",
+		join_sub = "For \u{e5} l\u{e5}se opp skriptet m\u{e5} du bli med i gruppen.",
+		s1 = "Trykk p\u{e5} Bli med i gruppen. Lenken kopieres.",
+		s2 = "\u{c5}pne nettleseren og lim den inn.",
+		s3 = "Trykk p\u{e5} Bli med p\u{e5} gruppesiden. Ferdig!",
+		join_btn = "Bli med i gruppen",
+		link_copied = "Lenken er kopiert. Lim den inn i nettleseren.",
+		copy_failed = "Kunne ikke kopiere. S\u{f8}k etter \u{ab}%s\u{bb} p\u{e5} Roblox og bli med.",
+		tab_join = "L\u{e5}s opp",
+		tab_lang = "Spr\u{e5}k",
+		lang_sub = "Velg spr\u{e5}ket ditt",
+		already = "Du er allerede med i gruppen. Takk!",
+		check_title = "Sjekk igjen",
+		check_sub = "Har du blitt med i gruppen? Trykk her for \u{e5} bekrefte",
+		checking = "Sjekker...",
+		not_in_group = "Oi, det ser ut til at du ikke er med i gruppen enn\u{e5}.",
+		verified = "Bekreftet! Skriptet er l\u{e5}st opp.",
+		kick = "Nye kontoer og alt-kontoer er forbudt. Bruk hovedkontoen din.",
+	},
+	da = {
+		join_title = "L\u{e5}s scriptet op",
+		join_sub = "For at l\u{e5}se scriptet op skal du deltage i gruppen.",
+		s1 = "Tryk p\u{e5} Deltag i gruppen. Linket kopieres.",
+		s2 = "\u{c5}bn din browser og inds\u{e6}t det.",
+		s3 = "Tryk p\u{e5} Deltag p\u{e5} gruppesiden. F\u{e6}rdig!",
+		join_btn = "Deltag i gruppen",
+		link_copied = "Linket er kopieret. Inds\u{e6}t det i din browser.",
+		copy_failed = "Kunne ikke kopiere. S\u{f8}g efter \u{201c}%s\u{201d} p\u{e5} Roblox og deltag.",
+		tab_join = "L\u{e5}s op",
+		tab_lang = "Sprog",
+		lang_sub = "V\u{e6}lg dit sprog",
+		already = "Du er allerede med i gruppen. Tak!",
+		check_title = "Tjek igen",
+		check_sub = "Er du med i gruppen? Tryk her for at bekr\u{e6}fte",
+		checking = "Tjekker...",
+		not_in_group = "Ups, det ser ikke ud til, at du er med i gruppen endnu.",
+		verified = "Bekr\u{e6}ftet! Scriptet er l\u{e5}st op.",
+		kick = "Nye konti og alt-konti er forbudt. Brug din hovedkonto.",
+	},
+	fi = {
+		join_title = "Avaa skripti",
+		join_sub = "Skriptin avaamiseksi sinun t\u{e4}ytyy liitty\u{e4} ryhm\u{e4}\u{e4}n.",
+		s1 = "Paina Liity ryhm\u{e4}\u{e4}n. Linkki kopioituu.",
+		s2 = "Avaa selain ja liit\u{e4} se.",
+		s3 = "Paina ryhm\u{e4}n sivulla Liity. Valmis!",
+		join_btn = "Liity ryhm\u{e4}\u{e4}n",
+		link_copied = "Linkki kopioitu. Liit\u{e4} se selaimeen.",
+		copy_failed = "Kopiointi ep\u{e4}onnistui. Hae \u{201d}%s\u{201d} Robloxista ja liity.",
+		tab_join = "Avaa",
+		tab_lang = "Kieli",
+		lang_sub = "Valitse kieli",
+		already = "Olet jo ryhm\u{e4}ss\u{e4}. Kiitos!",
+		check_title = "Tarkista uudelleen",
+		check_sub = "Liityitk\u{f6} ryhm\u{e4}\u{e4}n? Vahvista painamalla t\u{e4}st\u{e4}",
+		checking = "Tarkistetaan...",
+		not_in_group = "Hups, et n\u{e4}yt\u{e4} olevan viel\u{e4} ryhm\u{e4}ss\u{e4}.",
+		verified = "Vahvistettu! Skripti avattu.",
+		kick = "Uudet ja sivutilit ovat kiellettyj\u{e4}. K\u{e4}yt\u{e4} p\u{e4}\u{e4}asiallista tili\u{e4}si.",
+	},
+	cs = {
+		join_title = "Odemkni skript",
+		join_sub = "Pro odemknut\u{ed} skriptu se mus\u{ed}\u{161} p\u{159}ipojit ke skupin\u{11b}.",
+		s1 = "Klepni na P\u{159}ipojit se ke skupin\u{11b}. Odkaz se zkop\u{ed}ruje.",
+		s2 = "Otev\u{159}i prohl\u{ed}\u{17e}e\u{10d} a vlo\u{17e} ho.",
+		s3 = "Na str\u{e1}nce skupiny klepni na P\u{159}ipojit se. Hotovo!",
+		join_btn = "P\u{159}ipojit se ke skupin\u{11b}",
+		link_copied = "Odkaz zkop\u{ed}rov\u{e1}n. Vlo\u{17e} ho do prohl\u{ed}\u{17e}e\u{10d}e.",
+		copy_failed = "Kop\u{ed}rov\u{e1}n\u{ed} se nepovedlo. Vyhledej \u{201e}%s\u{201c} na Robloxu a p\u{159}ipoj se.",
+		tab_join = "Odemknout",
+		tab_lang = "Jazyk",
+		lang_sub = "Vyber jazyk",
+		already = "U\u{17e} ve skupin\u{11b} jsi. D\u{ed}ky!",
+		check_title = "Zkontrolovat znovu",
+		check_sub = "U\u{17e} ses p\u{159}ipojil? Klepni zde pro ov\u{11b}\u{159}en\u{ed}",
+		checking = "Kontroluji...",
+		not_in_group = "Jejda, vypad\u{e1} to, \u{17e}e ve skupin\u{11b} je\u{161}t\u{11b} nejsi.",
+		verified = "Ov\u{11b}\u{159}eno! Skript odemknut.",
+		kick = "Nov\u{e9} a alternativn\u{ed} \u{fa}\u{10d}ty jsou zak\u{e1}z\u{e1}ny. Pou\u{17e}ij hlavn\u{ed} \u{fa}\u{10d}et.",
+	},
+	sk = {
+		join_title = "Odomkni skript",
+		join_sub = "Na odomknutie skriptu sa mus\u{ed}\u{161} pripoji\u{165} do skupiny.",
+		s1 = "\u{164}ukni na Pripoji\u{165} sa do skupiny. Odkaz sa skop\u{ed}ruje.",
+		s2 = "Otvor prehliada\u{10d} a vlo\u{17e} ho.",
+		s3 = "Na str\u{e1}nke skupiny \u{165}ukni na Pripoji\u{165} sa. Hotovo!",
+		join_btn = "Pripoji\u{165} sa do skupiny",
+		link_copied = "Odkaz skop\u{ed}rovan\u{fd}. Vlo\u{17e} ho do prehliada\u{10d}a.",
+		copy_failed = "Kop\u{ed}rovanie zlyhalo. Vyh\u{13e}adaj \u{201e}%s\u{201c} na Roblox a pripoj sa.",
+		tab_join = "Odomkn\u{fa}\u{165}",
+		tab_lang = "Jazyk",
+		lang_sub = "Vyber jazyk",
+		already = "U\u{17e} v skupine si. \u{10e}akujeme!",
+		check_title = "Skontrolova\u{165} znova",
+		check_sub = "U\u{17e} si sa pripojil? \u{164}ukni sem na overenie",
+		checking = "Kontrolujem...",
+		not_in_group = "Ups, vyzer\u{e1} to, \u{17e}e v skupine e\u{161}te nie si.",
+		verified = "Overen\u{e9}! Skript odomknut\u{fd}.",
+		kick = "Nov\u{e9} a alternat\u{ed}vne \u{fa}\u{10d}ty s\u{fa} zak\u{e1}zan\u{e9}. Pou\u{17e}i hlavn\u{fd} \u{fa}\u{10d}et.",
+	},
+	hu = {
+		join_title = "Oldd fel a szkriptet",
+		join_sub = "A szkript felold\u{e1}s\u{e1}hoz csatlakoznod kell a csoporthoz.",
+		s1 = "Koppints a Csatlakoz\u{e1}s a csoporthoz gombra. A link kim\u{e1}sol\u{f3}dik.",
+		s2 = "Nyisd meg a b\u{f6}ng\u{e9}sz\u{151}t, \u{e9}s illeszd be.",
+		s3 = "A csoport oldal\u{e1}n koppints a Csatlakoz\u{e1}s gombra. K\u{e9}sz!",
+		join_btn = "Csatlakoz\u{e1}s a csoporthoz",
+		link_copied = "Link kim\u{e1}solva. Illeszd be a b\u{f6}ng\u{e9}sz\u{151}be.",
+		copy_failed = "Nem siker\u{fc}lt m\u{e1}solni. Keresd a(z) \u{201e}%s\u{201d} csoportot a Robloxon, \u{e9}s csatlakozz.",
+		tab_join = "Felold\u{e1}s",
+		tab_lang = "Nyelv",
+		lang_sub = "V\u{e1}laszd ki a nyelvet",
+		already = "M\u{e1}r a csoport tagja vagy. K\u{f6}szi!",
+		check_title = "\u{da}jraellen\u{151}rz\u{e9}s",
+		check_sub = "Csatlakozt\u{e1}l a csoporthoz? Koppints ide az ellen\u{151}rz\u{e9}shez",
+		checking = "Ellen\u{151}rz\u{e9}s...",
+		not_in_group = "Hopp\u{e1}, \u{fa}gy t\u{171}nik, m\u{e9}g nem vagy a csoport tagja.",
+		verified = "Ellen\u{151}rizve! A szkript feloldva.",
+		kick = "\u{da}j \u{e9}s m\u{e1}sodlagos fi\u{f3}kok tiltottak. Haszn\u{e1}ld a f\u{151}fi\u{f3}kodat.",
+	},
+	el = {
+		join_title = "\u{39e}\u{3b5}\u{3ba}\u{3bb}\u{3b5}\u{3af}\u{3b4}\u{3c9}\u{3c3}\u{3b5} \u{3c4}\u{3bf} \u{3c3}\u{3ba}\u{3c1}\u{3b9}\u{3c0}\u{3c4}",
+		join_sub = "\u{393}\u{3b9}\u{3b1} \u{3bd}\u{3b1} \u{3be}\u{3b5}\u{3ba}\u{3bb}\u{3b5}\u{3b9}\u{3b4}\u{3ce}\u{3c3}\u{3b5}\u{3b9}\u{3c2} \u{3c4}\u{3bf} \u{3c3}\u{3ba}\u{3c1}\u{3b9}\u{3c0}\u{3c4}, \u{3c0}\u{3c1}\u{3ad}\u{3c0}\u{3b5}\u{3b9} \u{3bd}\u{3b1} \u{3bc}\u{3c0}\u{3b5}\u{3b9}\u{3c2} \u{3c3}\u{3c4}\u{3b7}\u{3bd} \u{3bf}\u{3bc}\u{3ac}\u{3b4}\u{3b1}.",
+		s1 = "\u{3a0}\u{3ac}\u{3c4}\u{3b1} \u{3a3}\u{3c5}\u{3bc}\u{3bc}\u{3b5}\u{3c4}\u{3bf}\u{3c7}\u{3ae} \u{3c3}\u{3c4}\u{3b7}\u{3bd} \u{3bf}\u{3bc}\u{3ac}\u{3b4}\u{3b1}. \u{39f} \u{3c3}\u{3cd}\u{3bd}\u{3b4}\u{3b5}\u{3c3}\u{3bc}\u{3bf}\u{3c2} \u{3b1}\u{3bd}\u{3c4}\u{3b9}\u{3b3}\u{3c1}\u{3ac}\u{3c6}\u{3b5}\u{3c4}\u{3b1}\u{3b9}.",
+		s2 = "\u{386}\u{3bd}\u{3bf}\u{3b9}\u{3be}\u{3b5} \u{3c4}\u{3bf} \u{3c0}\u{3c1}\u{3cc}\u{3b3}\u{3c1}\u{3b1}\u{3bc}\u{3bc}\u{3b1} \u{3c0}\u{3b5}\u{3c1}\u{3b9}\u{3ae}\u{3b3}\u{3b7}\u{3c3}\u{3b7}\u{3c2} \u{3ba}\u{3b1}\u{3b9} \u{3ba}\u{3ac}\u{3bd}\u{3b5} \u{3b5}\u{3c0}\u{3b9}\u{3ba}\u{3cc}\u{3bb}\u{3bb}\u{3b7}\u{3c3}\u{3b7}.",
+		s3 = "\u{3a0}\u{3ac}\u{3c4}\u{3b1} \u{3a3}\u{3c5}\u{3bc}\u{3bc}\u{3b5}\u{3c4}\u{3bf}\u{3c7}\u{3ae} \u{3c3}\u{3c4}\u{3b7} \u{3c3}\u{3b5}\u{3bb}\u{3af}\u{3b4}\u{3b1} \u{3c4}\u{3b7}\u{3c2} \u{3bf}\u{3bc}\u{3ac}\u{3b4}\u{3b1}\u{3c2}. \u{388}\u{3c4}\u{3bf}\u{3b9}\u{3bc}\u{3bf}!",
+		join_btn = "\u{3a3}\u{3c5}\u{3bc}\u{3bc}\u{3b5}\u{3c4}\u{3bf}\u{3c7}\u{3ae} \u{3c3}\u{3c4}\u{3b7}\u{3bd} \u{3bf}\u{3bc}\u{3ac}\u{3b4}\u{3b1}",
+		link_copied = "\u{39f} \u{3c3}\u{3cd}\u{3bd}\u{3b4}\u{3b5}\u{3c3}\u{3bc}\u{3bf}\u{3c2} \u{3b1}\u{3bd}\u{3c4}\u{3b9}\u{3b3}\u{3c1}\u{3ac}\u{3c6}\u{3b7}\u{3ba}\u{3b5}. \u{39a}\u{3ac}\u{3bd}\u{3b5} \u{3b5}\u{3c0}\u{3b9}\u{3ba}\u{3cc}\u{3bb}\u{3bb}\u{3b7}\u{3c3}\u{3b7} \u{3c3}\u{3c4}\u{3bf} \u{3c0}\u{3c1}\u{3cc}\u{3b3}\u{3c1}\u{3b1}\u{3bc}\u{3bc}\u{3b1} \u{3c0}\u{3b5}\u{3c1}\u{3b9}\u{3ae}\u{3b3}\u{3b7}\u{3c3}\u{3b7}\u{3c2}.",
+		copy_failed = "\u{397} \u{3b1}\u{3bd}\u{3c4}\u{3b9}\u{3b3}\u{3c1}\u{3b1}\u{3c6}\u{3ae} \u{3b1}\u{3c0}\u{3ad}\u{3c4}\u{3c5}\u{3c7}\u{3b5}. \u{391}\u{3bd}\u{3b1}\u{3b6}\u{3ae}\u{3c4}\u{3b7}\u{3c3}\u{3b5} \u{ab}%s\u{bb} \u{3c3}\u{3c4}\u{3bf} Roblox \u{3ba}\u{3b1}\u{3b9} \u{3bc}\u{3c0}\u{3b5}\u{3c2}.",
+		tab_join = "\u{39e}\u{3b5}\u{3ba}\u{3bb}\u{3b5}\u{3af}\u{3b4}\u{3c9}\u{3bc}\u{3b1}",
+		tab_lang = "\u{393}\u{3bb}\u{3ce}\u{3c3}\u{3c3}\u{3b1}",
+		lang_sub = "\u{395}\u{3c0}\u{3af}\u{3bb}\u{3b5}\u{3be}\u{3b5} \u{3b3}\u{3bb}\u{3ce}\u{3c3}\u{3c3}\u{3b1}",
+		already = "\u{395}\u{3af}\u{3c3}\u{3b1}\u{3b9} \u{3ae}\u{3b4}\u{3b7} \u{3c3}\u{3c4}\u{3b7}\u{3bd} \u{3bf}\u{3bc}\u{3ac}\u{3b4}\u{3b1}. \u{395}\u{3c5}\u{3c7}\u{3b1}\u{3c1}\u{3b9}\u{3c3}\u{3c4}\u{3bf}\u{3cd}\u{3bc}\u{3b5}!",
+		check_title = "\u{388}\u{3bb}\u{3b5}\u{3b3}\u{3c7}\u{3bf}\u{3c2} \u{3be}\u{3b1}\u{3bd}\u{3ac}",
+		check_sub = "\u{39c}\u{3c0}\u{3ae}\u{3ba}\u{3b5}\u{3c2} \u{3c3}\u{3c4}\u{3b7}\u{3bd} \u{3bf}\u{3bc}\u{3ac}\u{3b4}\u{3b1}; \u{3a0}\u{3ac}\u{3c4}\u{3b1} \u{3b5}\u{3b4}\u{3ce} \u{3b3}\u{3b9}\u{3b1} \u{3b5}\u{3c0}\u{3b1}\u{3bb}\u{3ae}\u{3b8}\u{3b5}\u{3c5}\u{3c3}\u{3b7}",
+		checking = "\u{388}\u{3bb}\u{3b5}\u{3b3}\u{3c7}\u{3bf}\u{3c2}...",
+		not_in_group = "\u{3a9}\u{3c7}, \u{3c6}\u{3b1}\u{3af}\u{3bd}\u{3b5}\u{3c4}\u{3b1}\u{3b9} \u{3cc}\u{3c4}\u{3b9} \u{3b4}\u{3b5}\u{3bd} \u{3b5}\u{3af}\u{3c3}\u{3b1}\u{3b9} \u{3b1}\u{3ba}\u{3cc}\u{3bc}\u{3b1} \u{3c3}\u{3c4}\u{3b7}\u{3bd} \u{3bf}\u{3bc}\u{3ac}\u{3b4}\u{3b1}.",
+		verified = "\u{395}\u{3c0}\u{3b1}\u{3bb}\u{3b7}\u{3b8}\u{3b5}\u{3cd}\u{3c4}\u{3b7}\u{3ba}\u{3b5}! \u{3a4}\u{3bf} \u{3c3}\u{3ba}\u{3c1}\u{3b9}\u{3c0}\u{3c4} \u{3be}\u{3b5}\u{3ba}\u{3bb}\u{3b5}\u{3b9}\u{3b4}\u{3ce}\u{3b8}\u{3b7}\u{3ba}\u{3b5}.",
+		kick = "\u{39d}\u{3ad}\u{3bf}\u{3b9} \u{3ae} \u{3b5}\u{3bd}\u{3b1}\u{3bb}\u{3bb}\u{3b1}\u{3ba}\u{3c4}\u{3b9}\u{3ba}\u{3bf}\u{3af} \u{3bb}\u{3bf}\u{3b3}\u{3b1}\u{3c1}\u{3b9}\u{3b1}\u{3c3}\u{3bc}\u{3bf}\u{3af} \u{3b1}\u{3c0}\u{3b1}\u{3b3}\u{3bf}\u{3c1}\u{3b5}\u{3cd}\u{3bf}\u{3bd}\u{3c4}\u{3b1}\u{3b9}. \u{3a7}\u{3c1}\u{3b7}\u{3c3}\u{3b9}\u{3bc}\u{3bf}\u{3c0}\u{3bf}\u{3af}\u{3b7}\u{3c3}\u{3b5} \u{3c4}\u{3bf}\u{3bd} \u{3ba}\u{3cd}\u{3c1}\u{3b9}\u{3bf}.",
+	},
+	bg = {
+		join_title = "\u{41e}\u{442}\u{43a}\u{43b}\u{44e}\u{447}\u{438} \u{441}\u{43a}\u{440}\u{438}\u{43f}\u{442}\u{430}",
+		join_sub = "\u{417}\u{430} \u{434}\u{430} \u{43e}\u{442}\u{43a}\u{43b}\u{44e}\u{447}\u{438}\u{448} \u{441}\u{43a}\u{440}\u{438}\u{43f}\u{442}\u{430}, \u{442}\u{440}\u{44f}\u{431}\u{432}\u{430} \u{434}\u{430} \u{441}\u{435} \u{43f}\u{440}\u{438}\u{441}\u{44a}\u{435}\u{434}\u{438}\u{43d}\u{438}\u{448} \u{43a}\u{44a}\u{43c} \u{433}\u{440}\u{443}\u{43f}\u{430}\u{442}\u{430}.",
+		s1 = "\u{41d}\u{430}\u{442}\u{438}\u{441}\u{43d}\u{438} \u{201e}\u{41f}\u{440}\u{438}\u{441}\u{44a}\u{435}\u{434}\u{438}\u{43d}\u{438} \u{441}\u{435} \u{43a}\u{44a}\u{43c} \u{433}\u{440}\u{443}\u{43f}\u{430}\u{442}\u{430}\u{201c}. \u{412}\u{440}\u{44a}\u{437}\u{43a}\u{430}\u{442}\u{430} \u{441}\u{435} \u{43a}\u{43e}\u{43f}\u{438}\u{440}\u{430}.",
+		s2 = "\u{41e}\u{442}\u{432}\u{43e}\u{440}\u{438} \u{431}\u{440}\u{430}\u{443}\u{437}\u{44a}\u{440}\u{430} \u{438} \u{44f} \u{43f}\u{43e}\u{441}\u{442}\u{430}\u{432}\u{438}.",
+		s3 = "\u{41d}\u{430}\u{442}\u{438}\u{441}\u{43d}\u{438} \u{201e}\u{41f}\u{440}\u{438}\u{441}\u{44a}\u{435}\u{434}\u{438}\u{43d}\u{438} \u{441}\u{435}\u{201c} \u{43d}\u{430} \u{441}\u{442}\u{440}\u{430}\u{43d}\u{438}\u{446}\u{430}\u{442}\u{430} \u{43d}\u{430} \u{433}\u{440}\u{443}\u{43f}\u{430}\u{442}\u{430}. \u{413}\u{43e}\u{442}\u{43e}\u{432}\u{43e}!",
+		join_btn = "\u{41f}\u{440}\u{438}\u{441}\u{44a}\u{435}\u{434}\u{438}\u{43d}\u{438} \u{441}\u{435} \u{43a}\u{44a}\u{43c} \u{433}\u{440}\u{443}\u{43f}\u{430}\u{442}\u{430}",
+		link_copied = "\u{412}\u{440}\u{44a}\u{437}\u{43a}\u{430}\u{442}\u{430} \u{435} \u{43a}\u{43e}\u{43f}\u{438}\u{440}\u{430}\u{43d}\u{430}. \u{41f}\u{43e}\u{441}\u{442}\u{430}\u{432}\u{438} \u{44f} \u{432} \u{431}\u{440}\u{430}\u{443}\u{437}\u{44a}\u{440}\u{430}.",
+		copy_failed = "\u{41a}\u{43e}\u{43f}\u{438}\u{440}\u{430}\u{43d}\u{435}\u{442}\u{43e} \u{43d}\u{435} \u{443}\u{441}\u{43f}\u{44f}. \u{41f}\u{43e}\u{442}\u{44a}\u{440}\u{441}\u{438} \u{201e}%s\u{201c} \u{432} Roblox \u{438} \u{441}\u{435} \u{43f}\u{440}\u{438}\u{441}\u{44a}\u{435}\u{434}\u{438}\u{43d}\u{438}.",
+		tab_join = "\u{41e}\u{442}\u{43a}\u{43b}\u{44e}\u{447}\u{438}",
+		tab_lang = "\u{415}\u{437}\u{438}\u{43a}",
+		lang_sub = "\u{418}\u{437}\u{431}\u{435}\u{440}\u{438} \u{435}\u{437}\u{438}\u{43a}",
+		already = "\u{412}\u{435}\u{447}\u{435} \u{441}\u{438} \u{432} \u{433}\u{440}\u{443}\u{43f}\u{430}\u{442}\u{430}. \u{411}\u{43b}\u{430}\u{433}\u{43e}\u{434}\u{430}\u{440}\u{438}\u{43c}!",
+		check_title = "\u{41f}\u{440}\u{43e}\u{432}\u{435}\u{440}\u{438} \u{43e}\u{442}\u{43d}\u{43e}\u{432}\u{43e}",
+		check_sub = "\u{41f}\u{440}\u{438}\u{441}\u{44a}\u{435}\u{434}\u{438}\u{43d}\u{438} \u{43b}\u{438} \u{441}\u{435} \u{43a}\u{44a}\u{43c} \u{433}\u{440}\u{443}\u{43f}\u{430}\u{442}\u{430}? \u{41d}\u{430}\u{442}\u{438}\u{441}\u{43d}\u{438} \u{442}\u{443}\u{43a} \u{437}\u{430} \u{43f}\u{440}\u{43e}\u{432}\u{435}\u{440}\u{43a}\u{430}",
+		checking = "\u{41f}\u{440}\u{43e}\u{432}\u{435}\u{440}\u{44f}\u{432}\u{430} \u{441}\u{435}...",
+		not_in_group = "\u{41e}\u{43f}\u{430}, \u{438}\u{437}\u{433}\u{43b}\u{435}\u{436}\u{434}\u{430} \u{43e}\u{449}\u{435} \u{43d}\u{435} \u{441}\u{438} \u{432} \u{433}\u{440}\u{443}\u{43f}\u{430}\u{442}\u{430}.",
+		verified = "\u{41f}\u{43e}\u{442}\u{432}\u{44a}\u{440}\u{434}\u{435}\u{43d}\u{43e}! \u{421}\u{43a}\u{440}\u{438}\u{43f}\u{442}\u{44a}\u{442} \u{435} \u{43e}\u{442}\u{43a}\u{43b}\u{44e}\u{447}\u{435}\u{43d}.",
+		kick = "\u{41d}\u{43e}\u{432}\u{438} \u{438} \u{430}\u{43b}\u{442} \u{430}\u{43a}\u{430}\u{443}\u{43d}\u{442}\u{438} \u{441}\u{430} \u{437}\u{430}\u{431}\u{440}\u{430}\u{43d}\u{435}\u{43d}\u{438}. \u{418}\u{437}\u{43f}\u{43e}\u{43b}\u{437}\u{432}\u{430}\u{439} \u{43e}\u{441}\u{43d}\u{43e}\u{432}\u{43d}\u{438}\u{44f} \u{441}\u{438} \u{430}\u{43a}\u{430}\u{443}\u{43d}\u{442}.",
+	},
+	sr = {
+		join_title = "Otklju\u{10d}aj skriptu",
+		join_sub = "Da bi otklju\u{10d}ao skriptu, mora\u{161} da se pridru\u{17e}i\u{161} grupi.",
+		s1 = "Dodirni Pridru\u{17e}i se grupi. Link \u{107}e biti kopiran.",
+		s2 = "Otvori pregleda\u{10d} i nalepi ga.",
+		s3 = "Na stranici grupe dodirni Pridru\u{17e}i se. Gotovo!",
+		join_btn = "Pridru\u{17e}i se grupi",
+		link_copied = "Link je kopiran. Nalepi ga u pregleda\u{10d}.",
+		copy_failed = "Kopiranje nije uspelo. Potra\u{17e}i \u{201e}%s\u{201c} na Robloxu i pridru\u{17e}i se.",
+		tab_join = "Otklju\u{10d}aj",
+		tab_lang = "Jezik",
+		lang_sub = "Izaberi jezik",
+		already = "Ve\u{107} si u grupi. Hvala!",
+		check_title = "Proveri ponovo",
+		check_sub = "Da li si se pridru\u{17e}io grupi? Dodirni ovde za proveru",
+		checking = "Provera...",
+		not_in_group = "Ups, izgleda da jo\u{161} nisi u grupi.",
+		verified = "Provereno! Skripta je otklju\u{10d}ana.",
+		kick = "Novi i alternativni nalozi su zabranjeni. Koristi glavni nalog.",
+	},
+	hr = {
+		join_title = "Otklju\u{10d}aj skriptu",
+		join_sub = "Za otklju\u{10d}avanje skripte mora\u{161} se pridru\u{17e}iti grupi.",
+		s1 = "Dodirni Pridru\u{17e}i se grupi. Poveznica \u{107}e se kopirati.",
+		s2 = "Otvori preglednik i zalijepi je.",
+		s3 = "Na stranici grupe dodirni Pridru\u{17e}i se. Gotovo!",
+		join_btn = "Pridru\u{17e}i se grupi",
+		link_copied = "Poveznica kopirana. Zalijepi je u preglednik.",
+		copy_failed = "Kopiranje nije uspjelo. Potra\u{17e}i \u{201e}%s\u{201c} na Robloxu i pridru\u{17e}i se.",
+		tab_join = "Otklju\u{10d}aj",
+		tab_lang = "Jezik",
+		lang_sub = "Odaberi jezik",
+		already = "Ve\u{107} si u grupi. Hvala!",
+		check_title = "Provjeri ponovno",
+		check_sub = "Jesi li se pridru\u{17e}io grupi? Dodirni ovdje za provjeru",
+		checking = "Provjera...",
+		not_in_group = "Ups, \u{10d}ini se da jo\u{161} nisi u grupi.",
+		verified = "Provjereno! Skripta je otklju\u{10d}ana.",
+		kick = "Novi i alternativni ra\u{10d}uni su zabranjeni. Koristi glavni ra\u{10d}un.",
+	},
+	sl = {
+		join_title = "Odkleni skript",
+		join_sub = "Za odklep skripta se mora\u{161} pridru\u{17e}iti skupini.",
+		s1 = "Tapni Pridru\u{17e}i se skupini. Povezava se kopira.",
+		s2 = "Odpri brskalnik in jo prilepi.",
+		s3 = "Na strani skupine tapni Pridru\u{17e}i se. Kon\u{10d}ano!",
+		join_btn = "Pridru\u{17e}i se skupini",
+		link_copied = "Povezava kopirana. Prilepi jo v brskalnik.",
+		copy_failed = "Kopiranje ni uspelo. Poi\u{161}\u{10d}i \u{bb}%s\u{ab} na Robloxu in se pridru\u{17e}i.",
+		tab_join = "Odkleni",
+		tab_lang = "Jezik",
+		lang_sub = "Izberi jezik",
+		already = "\u{17d}e si v skupini. Hvala!",
+		check_title = "Preveri znova",
+		check_sub = "Si se pridru\u{17e}il skupini? Tapni tukaj za preverjanje",
+		checking = "Preverjanje...",
+		not_in_group = "Ups, ka\u{17e}e, da \u{161}e nisi v skupini.",
+		verified = "Preverjeno! Skript je odklenjen.",
+		kick = "Novi in alternativni ra\u{10d}uni so prepovedani. Uporabi glavni ra\u{10d}un.",
+	},
+	lt = {
+		join_title = "Atrakink skript\u{105}",
+		join_sub = "Nor\u{117}damas atrakinti skript\u{105}, turi prisijungti prie grup\u{117}s.",
+		s1 = "Paspausk Prisijungti prie grup\u{117}s. Nuoroda bus nukopijuota.",
+		s2 = "Atidaryk nar\u{161}ykl\u{119} ir \u{12f}klijuok j\u{105}.",
+		s3 = "Grup\u{117}s puslapyje paspausk Prisijungti. Baigta!",
+		join_btn = "Prisijungti prie grup\u{117}s",
+		link_copied = "Nuoroda nukopijuota. \u{12e}klijuok j\u{105} nar\u{161}ykl\u{117}je.",
+		copy_failed = "Nepavyko nukopijuoti. Susirask \u{201e}%s\u{201c} Roblox ir prisijunk.",
+		tab_join = "Atrakinti",
+		tab_lang = "Kalba",
+		lang_sub = "Pasirink kalb\u{105}",
+		already = "Jau esi grup\u{117}je. A\u{10d}i\u{16b}!",
+		check_title = "Patikrinti dar kart\u{105}",
+		check_sub = "Prisijungei prie grup\u{117}s? Spausk \u{10d}ia patvirtinimui",
+		checking = "Tikrinama...",
+		not_in_group = "Oi, atrodo, dar nesi grup\u{117}je.",
+		verified = "Patvirtinta! Skriptas atrakintas.",
+		kick = "Naujos ir alt paskyros draud\u{17e}iamos. Naudok pagrindin\u{119} paskyr\u{105}.",
+	},
+	lv = {
+		join_title = "Atblo\u{137}\u{113} skriptu",
+		join_sub = "Lai atblo\u{137}\u{113}tu skriptu, tev j\u{101}pievienojas grupai.",
+		s1 = "Nospied Pievienoties grupai. Saite tiks nokop\u{113}ta.",
+		s2 = "Atver p\u{101}rl\u{16b}ku un iel\u{12b}m\u{113} to.",
+		s3 = "Grupas lap\u{101} nospied Pievienoties. Gatavs!",
+		join_btn = "Pievienoties grupai",
+		link_copied = "Saite nokop\u{113}ta. Iel\u{12b}m\u{113} to p\u{101}rl\u{16b}k\u{101}.",
+		copy_failed = "Kop\u{113}\u{161}ana neizdev\u{101}s. Mekl\u{113} \u{201e}%s\u{201c} Roblox un pievienojies.",
+		tab_join = "Atblo\u{137}\u{113}t",
+		tab_lang = "Valoda",
+		lang_sub = "Izv\u{113}lies valodu",
+		already = "Tu jau esi grup\u{101}. Paldies!",
+		check_title = "P\u{101}rbaud\u{12b}t v\u{113}lreiz",
+		check_sub = "Vai pievienojies grupai? Nospied \u{161}eit, lai p\u{101}rbaud\u{12b}tu",
+		checking = "P\u{101}rbauda...",
+		not_in_group = "Hmm, \u{161}\u{137}iet, ka tu v\u{113}l neesi grup\u{101}.",
+		verified = "P\u{101}rbaud\u{12b}ts! Skripts atblo\u{137}\u{113}ts.",
+		kick = "Jauni un alternat\u{12b}vie konti ir aizliegti. Izmanto galveno kontu.",
+	},
+	et = {
+		join_title = "Ava skript",
+		join_sub = "Skripti avamiseks pead gruppi liituma.",
+		s1 = "Vajuta Liitu grupiga. Link kopeeritakse.",
+		s2 = "Ava brauser ja kleebi see sinna.",
+		s3 = "Vajuta grupi lehel Liitu. Valmis!",
+		join_btn = "Liitu grupiga",
+		link_copied = "Link kopeeritud. Kleebi see brauserisse.",
+		copy_failed = "Kopeerimine eba\u{f5}nnestus. Otsi Robloxis \u{201e}%s\u{201c} ja liitu.",
+		tab_join = "Ava",
+		tab_lang = "Keel",
+		lang_sub = "Vali keel",
+		already = "Oled juba grupis. Ait\u{e4}h!",
+		check_title = "Kontrolli uuesti",
+		check_sub = "Liitusid grupiga? Vajuta siia kinnitamiseks",
+		checking = "Kontrollin...",
+		not_in_group = "Oi, paistab, et sa pole veel grupis.",
+		verified = "Kinnitatud! Skript on avatud.",
+		kick = "Uued ja alternatiivsed kontod on keelatud. Kasuta peamist kontot.",
+	},
+	ca = {
+		join_title = "Desbloqueja l'script",
+		join_sub = "Per desbloquejar l'script, t'has d'unir al grup.",
+		s1 = "Toca Uneix-te al grup. L'enlla\u{e7} es copia.",
+		s2 = "Obre el navegador i enganxa'l.",
+		s3 = "Toca Uneix-te a la p\u{e0}gina del grup. Fet!",
+		join_btn = "Uneix-te al grup",
+		link_copied = "Enlla\u{e7} copiat. Enganxa'l al navegador.",
+		copy_failed = "No s'ha pogut copiar. Cerca \u{ab}%s\u{bb} a Roblox i uneix-te.",
+		tab_join = "Desbloqueja",
+		tab_lang = "Idioma",
+		lang_sub = "Tria l'idioma",
+		already = "Ja ets al grup. Gr\u{e0}cies!",
+		check_title = "Torna a comprovar",
+		check_sub = "T'has unit al grup? Toca aqu\u{ed} per verificar",
+		checking = "Comprovant...",
+		not_in_group = "Ep, sembla que encara no ets al grup.",
+		verified = "Verificat! Script desbloquejat.",
+		kick = "Comptes nous o alternatius prohibits. Utilitza el teu compte principal.",
+	},
+	az = {
+		join_title = "Skripti a\u{e7}",
+		join_sub = "Skripti a\u{e7}maq \u{fc}\u{e7}\u{fc}n qrupa qo\u{15f}ulmal\u{131}san.",
+		s1 = "Qrupa qo\u{15f}ul d\u{fc}ym\u{259}sin\u{259} bas. Link kopyalanacaq.",
+		s2 = "Brauzeri a\u{e7} v\u{259} linki yap\u{131}\u{15f}d\u{131}r.",
+		s3 = "Qrup s\u{259}hif\u{259}sind\u{259} Qo\u{15f}ul d\u{fc}ym\u{259}sin\u{259} bas. Haz\u{131}rd\u{131}r!",
+		join_btn = "Qrupa qo\u{15f}ul",
+		link_copied = "Link kopyaland\u{131}. Brauzerd\u{259} yap\u{131}\u{15f}d\u{131}r.",
+		copy_failed = "Kopyalamaq al\u{131}nmad\u{131}. Roblox-da \u{201c}%s\u{201d} axtar v\u{259} qo\u{15f}ul.",
+		tab_join = "A\u{e7}",
+		tab_lang = "Dil",
+		lang_sub = "Dilini se\u{e7}",
+		already = "S\u{259}n art\u{131}q qrupdasan. T\u{259}\u{15f}\u{259}kk\u{fc}rl\u{259}r!",
+		check_title = "Yenid\u{259}n yoxla",
+		check_sub = "Qrupa qo\u{15f}uldun? T\u{259}sdiql\u{259}m\u{259}k \u{fc}\u{e7}\u{fc}n bura bas",
+		checking = "Yoxlan\u{131}l\u{131}r...",
+		not_in_group = "Ups, dey\u{259}s\u{259}n h\u{259}l\u{259} qrupda deyils\u{259}n.",
+		verified = "T\u{259}sdiql\u{259}ndi! Skript a\u{e7}\u{131}ld\u{131}.",
+		kick = "Yeni v\u{259} alternativ hesablar qada\u{11f}and\u{131}r. \u{18f}sas hesab\u{131}ndan istifad\u{259} et.",
+	},
+	sw = {
+		join_title = "Fungua skripti",
+		join_sub = "Ili kufungua skripti, unahitaji kujiunga na kikundi.",
+		s1 = "Gusa Jiunge na Kikundi. Kiungo kitanakiliwa.",
+		s2 = "Fungua kivinjari chako na ukibandike.",
+		s3 = "Gusa Jiunge kwenye ukurasa wa kikundi. Imekamilika!",
+		join_btn = "Jiunge na Kikundi",
+		link_copied = "Kiungo kimenakiliwa. Kibandike kwenye kivinjari.",
+		copy_failed = "Imeshindwa kunakili. Tafuta \u{201c}%s\u{201d} kwenye Roblox na ujiunge.",
+		tab_join = "Fungua",
+		tab_lang = "Lugha",
+		lang_sub = "Chagua lugha yako",
+		already = "Tayari uko kwenye kikundi. Asante!",
+		check_title = "Angalia Tena",
+		check_sub = "Umejiunga na kikundi? Gusa hapa kuthibitisha",
+		checking = "Inaangalia...",
+		not_in_group = "Lo, inaonekana bado hujajiunga na kikundi.",
+		verified = "Imethibitishwa! Skripti imefunguliwa.",
+		kick = "Akaunti mpya au mbadala haziruhusiwi. Tumia akaunti yako kuu.",
+	},
+}
+
+local RTL = { ar = true, he = true, fa = true, ur = true } -- these get a slightly bigger font in the picker
+
+-- some locale codes Roblox/Windows/phones report differ from the ones used above
+local ALIAS = {
+	nb = "no", nn = "no", iw = "he", ["in"] = "id", tl = "fil", mo = "ro", bs = "hr", sh = "sr",
+}
+
+-- Roblox tells us the player's language (e.g. "pt-br"), so we can preselect it
+local function detectLanguage()
+	-- ask in a few ways (some executors block one of them) and take the first non-English hit
+	local sources = {
+		function() return LocalPlayer.LocaleId end,
+		function() return LocalizationService.RobloxLocaleId end,
+		function() return LocalizationService.SystemLocaleId end,
+	}
+	for _, get in ipairs(sources) do
+		local ok, id = pcall(get)
+		if ok and type(id) == "string" and id ~= "" then
+			local lid = id:lower()
+			local code = lid:match("^(%a+)")
+			if code == "zh" and (lid:find("tw") or lid:find("hk") or lid:find("hant")) then code = "zht" end
+			code = ALIAS[code] or code
+			if code and code ~= "en" and STR[code] then return code end
+		end
+	end
+	return "en"
+end
+
+local lang = detectLanguage() -- preselected; the player can change it from the Language tab
+
+local function tr(key, ...)
+	local str = (STR[lang] and STR[lang][key]) or STR.en[key] or key
+	if select("#", ...) > 0 then return string.format(str, ...) end
+	return str
+end
+
+---------------- group check ----------------
+local function getRequestFn()
+	return (syn and syn.request) or request or http_request or (http and http.request) or (fluxus and fluxus.request)
+end
+
+-- true if the local player is in the group.
+-- 1) GroupService: Roblox's own call, it waits properly and never freezes the game
+-- 2) Player:IsInGroup (can stay cached until you rejoin)
+-- 3) optional: the groups web API through the executor's request function. Always fresh, but on some
+--    mobile executors this call blocks the whole game, so it is off unless USE_HTTP_CHECK = true
+local GroupService = game:GetService("GroupService")
+
+local function isInGroup()
+	local ok, groups = pcall(function() return GroupService:GetGroupsAsync(LocalPlayer.UserId) end)
+	if ok and type(groups) == "table" then
+		for _, g in ipairs(groups) do
+			if type(g) == "table" and g.Id == GROUP_ID then return true end
+		end
+	end
+
+	local ok2, result = pcall(function() return LocalPlayer:IsInGroup(GROUP_ID) end)
+	if ok2 and result == true then return true end
+
+	if USE_HTTP_CHECK then
+		local req = getRequestFn()
+		if req then
+			local okReq, res = pcall(req, {
+				Url = "https://groups.roblox.com/v2/users/" .. LocalPlayer.UserId .. "/groups/roles",
+				Method = "GET",
+			})
+			if okReq and type(res) == "table" and type(res.Body) == "string" then
+				local okJson, data = pcall(function() return HttpService:JSONDecode(res.Body) end)
+				if okJson and type(data) == "table" and type(data.data) == "table" then
+					for _, entry in ipairs(data.data) do
+						if type(entry) == "table" and type(entry.group) == "table" and entry.group.id == GROUP_ID then
+							return true
+						end
+					end
+				end
+			end
+		end
+	end
+	return false
+end
+
+local function runUnlock()
+	task.spawn(function()
+		local ok, err = pcall(ON_UNLOCK)
+		if not ok then warn("[" .. NAME .. "] ON_UNLOCK error: " .. tostring(err)) end
+	end)
+end
+
+---------------- alt / new account gate ----------------
+-- This script runs on the player's own client, so it can only remove the account that is running it
+-- (it cannot kick other players). Account age is the signal: alts are almost always brand new.
+if MIN_ACCOUNT_AGE_DAYS > 0 and LocalPlayer.AccountAge < MIN_ACCOUNT_AGE_DAYS then
+	if KICK_NEW_ACCOUNTS then
+		pcall(function() LocalPlayer:Kick(tr("kick")) end)
+	else
+		pcall(function()
+			StarterGui:SetCore("SendNotification", { Title = NAME, Text = tr("kick"), Duration = 8 })
+		end)
+	end
+	return
+end
+
+-- already in the group: nothing to show, just unlock
+if SKIP_IF_ALREADY_MEMBER and isInGroup() then
+	pcall(function()
+		StarterGui:SetCore("SendNotification", { Title = NAME, Text = tr("already"), Duration = 5 })
+	end)
+	runUnlock()
+	return
+end
+
+---------------- gui root ----------------
+local function getContainer()
+	if gethui then
+		local ok, ui = pcall(gethui)
+		if ok and ui then return ui end
+	end
+	local ok, core = pcall(function() return game:GetService("CoreGui") end)
+	if ok and core then return core end
+	return LocalPlayer:WaitForChild("PlayerGui")
+end
+
+local container = getContainer()
+pcall(function()
+	for _, old in ipairs(container:GetChildren()) do
+		if old.Name == "LumenGroupGate" then old:Destroy() end
+	end
+	for _, old in ipairs(Lighting:GetChildren()) do
+		if old.Name == "LumenBlur" then old:Destroy() end
+	end
+end)
+
+local gui = make("ScreenGui", {
+	Name = "LumenGroupGate", ResetOnSpawn = false, DisplayOrder = 100, IgnoreGuiInset = true,
+	ZIndexBehavior = Enum.ZIndexBehavior.Sibling,
+})
+if not pcall(function() gui.Parent = container end) then
+	gui.Parent = LocalPlayer:WaitForChild("PlayerGui")
+end
+
+local conns = {}
+
+-- shrink the window on small screens
+local function computeFit()
+	local v = gui.AbsoluteSize
+	if v.X < 50 or v.Y < 50 then return 1 end
+	return math.clamp(math.min(v.X / (W + 32), v.Y / (H + 48)), 0.45, 1)
+end
+local fit = computeFit()
+
+-- drag with screen clamping; margin() = how far the center must stay from the screen edges
+local function draggable(handle, target, margin)
+	local dragging, dragStart, origin, moved = false, nil, nil, false
+	handle.InputBegan:Connect(function(input)
+		local t = input.UserInputType
+		if t == Enum.UserInputType.MouseButton1 or t == Enum.UserInputType.Touch then
+			dragging, moved, dragStart, origin = true, false, input.Position, target.Position
+		end
+	end)
+	table.insert(conns, UserInputService.InputChanged:Connect(function(input)
+		local t = input.UserInputType
+		if dragging and (t == Enum.UserInputType.MouseMovement or t == Enum.UserInputType.Touch) then
+			local delta = input.Position - dragStart
+			if delta.Magnitude > 6 then moved = true end
+			local v = gui.AbsoluteSize
+			local mx, my = margin()
+			mx, my = math.min(mx, v.X / 2), math.min(my, v.Y / 2)
+			target.Position = UDim2.fromOffset(
+				math.clamp(origin.X.Scale * v.X + origin.X.Offset + delta.X, mx, v.X - mx),
+				math.clamp(origin.Y.Scale * v.Y + origin.Y.Offset + delta.Y, my, v.Y - my)
+			)
+		end
+	end))
+	table.insert(conns, UserInputService.InputEnded:Connect(function(input)
+		local t = input.UserInputType
+		if t == Enum.UserInputType.MouseButton1 or t == Enum.UserInputType.Touch then dragging = false end
+	end))
+	return function() return moved end
+end
+
+---------------- logo ----------------
+-- gradient squircle with an "L" and a spark. Everything scales from `size`.
+local function makeLogo(parent, size, position)
+	local u = size / 10
+	local icon = make("Frame", {
+		Size = UDim2.fromOffset(size, size), Position = position,
+		BackgroundColor3 = C.white, BorderSizePixel = 0,
+	}, parent)
+	round(icon, u * 3)
+	local k = ColorSequenceKeypoint.new
+	spin(make("UIGradient", { Color = ColorSequence.new({ k(0, C.accent), k(0.5, C.accent2), k(1, C.accent) }) }, icon), 8)
+	stroke(icon, C.white, 1, 0.82)
+
+	local gloss = make("Frame", {
+		Size = UDim2.new(1, -2, 0.5, 0), Position = UDim2.fromOffset(1, 1),
+		BackgroundColor3 = C.white, BorderSizePixel = 0,
+	}, icon)
+	round(gloss, u * 3 - 1)
+	make("UIGradient", {
+		Transparency = NumberSequence.new({ NumberSequenceKeypoint.new(0, 0.72), NumberSequenceKeypoint.new(1, 1) }),
+		Rotation = 90,
+	}, gloss)
+
+	local bar, tall, foot = u * 1.5, u * 4.6, u * 3.6
+	local x0, y0 = u * 3, u * 2.4
+	local function piece(w, h, x, y, r)
+		local f = make("Frame", {
+			Size = UDim2.fromOffset(w, h), Position = UDim2.fromOffset(x, y),
+			BackgroundColor3 = C.white, BorderSizePixel = 0,
+		}, icon)
+		round(f, r)
+	end
+	piece(bar, tall, x0, y0, bar / 2)                                     -- stem
+	piece(foot, bar, x0, y0 + tall - bar, bar / 2)                        -- foot
+	piece(u * 1.3, u * 1.3, u * 6.2, y0 + tall - bar - u * 2.2, u * 1.3)  -- spark
+end
+
+---------------- window + soft shadow ----------------
+local root = make("Frame", {
+	Size = UDim2.fromOffset(W, H), Position = UDim2.fromScale(0.5, 0.5),
+	AnchorPoint = Vector2.new(0.5, 0.5), BackgroundTransparency = 1, BorderSizePixel = 0,
+}, gui)
+local rootScale = make("UIScale", { Scale = fit * 0.94 }, root)
+
+-- stacked rounded layers = a soft shadow that always matches the corner radius (no image needed)
+local shadowLayers = {}
+for i = 1, 8 do
+	local grow = i * 7
+	local layer = make("Frame", {
+		AnchorPoint = Vector2.new(0.5, 0.5), Position = UDim2.new(0.5, 0, 0.5, 10),
+		Size = UDim2.new(1, grow, 1, grow), BackgroundColor3 = Color3.new(0, 0, 0),
+		BackgroundTransparency = 1, BorderSizePixel = 0, ZIndex = 0,
+	}, root)
+	round(layer, CORNER + grow / 2)
+	shadowLayers[i] = layer
+end
+local function setShadow(visible, t)
+	for _, layer in ipairs(shadowLayers) do
+		tween(layer, t, { BackgroundTransparency = visible and 0.955 or 1 })
+	end
+end
+
+local window = make("CanvasGroup", {
+	Size = UDim2.fromScale(1, 1), BackgroundColor3 = C.bg, BackgroundTransparency = 0.08, BorderSizePixel = 0,
+	GroupTransparency = 1, ZIndex = 1,
+}, root)
+round(window, CORNER)
+-- (a stroke on a CanvasGroup ignores GroupTransparency, so it's faded on its own)
+local windowStroke = stroke(window, C.white, 1.5, 1)
+spin(make("UIGradient", { Color = sweep(Color3.fromRGB(40, 40, 54), C.accent) }, windowStroke), 6)
+
+-- ambient glows
+local function glow(color, height, atBottom, from, to)
+	local f = make("Frame", {
+		Size = UDim2.new(1, 0, 0, height), BackgroundColor3 = color, BorderSizePixel = 0,
+		AnchorPoint = Vector2.new(0, atBottom and 1 or 0),
+		Position = UDim2.fromScale(0, atBottom and 1 or 0),
+	}, window)
+	make("UIGradient", {
+		Transparency = NumberSequence.new({ NumberSequenceKeypoint.new(0, from), NumberSequenceKeypoint.new(1, to) }),
+		Rotation = 90,
+	}, f)
+end
+glow(C.accent, 130, false, 0.84, 1)
+glow(C.accent2, 110, true, 1, 0.9)
+
+---------------- header (title bar) ----------------
+local header = make("Frame", { Size = UDim2.new(1, 0, 0, HEADER), BackgroundTransparency = 1 }, window)
+makeLogo(header, 26, UDim2.fromOffset(18, 11))
+label({
+	Size = UDim2.fromOffset(140, 20), Position = UDim2.fromOffset(52, 14), Text = NAME,
+	TextColor3 = C.text, Font = Enum.Font.GothamBold, TextSize = 15, TextXAlignment = Enum.TextXAlignment.Left,
+}, header)
+
+local function headerButton(offsetX, caption, size)
+	local btn = make("TextButton", {
+		Size = UDim2.fromOffset(34, 34), Position = UDim2.new(1, offsetX, 0, 7),
+		BackgroundColor3 = C.surface, BackgroundTransparency = 1, Text = caption, TextColor3 = C.muted,
+		Font = Enum.Font.GothamBold, TextSize = size, AutoButtonColor = false, BorderSizePixel = 0,
+	}, header)
+	round(btn, 9)
+	bind(btn,
+		function() tween(btn, 0.12, { BackgroundTransparency = 0, TextColor3 = C.text }) end,
+		function() tween(btn, 0.12, { BackgroundTransparency = 1, TextColor3 = C.muted }) end)
+	return btn
+end
+local minBtn = headerButton(-46, "\u{2013}", 18)
+
+make("Frame", { -- line under the title bar
+	Size = UDim2.new(1, 0, 0, 1), Position = UDim2.fromOffset(0, HEADER - 1),
+	BackgroundColor3 = C.stroke, BackgroundTransparency = 0.4, BorderSizePixel = 0,
+}, window)
+if COMPACT then
+	make("Frame", { -- line under the tab row
+		Size = UDim2.new(1, 0, 0, 1), Position = UDim2.fromOffset(0, PAGE_Y - 1),
+		BackgroundColor3 = C.stroke, BackgroundTransparency = 0.4, BorderSizePixel = 0,
+	}, window)
+else
+	make("Frame", { -- line between the sidebar and the pages
+		Size = UDim2.new(0, 1, 1, -HEADER), Position = UDim2.fromOffset(SIDEBAR, HEADER),
+		BackgroundColor3 = C.stroke, BackgroundTransparency = 0.4, BorderSizePixel = 0,
+	}, window)
+end
+
+draggable(header, root, function() return W * fit / 2, H * fit / 2 end)
+
+---------------- button ----------------
+-- returns the clickable area and its label
+local function makeButton(parent, position, size, primary, caption, textSize)
+	local hit = make("TextButton", {
+		Position = position, Size = size, BackgroundTransparency = 1, Text = "",
+		AutoButtonColor = false, BorderSizePixel = 0,
+	}, parent)
+	local fill = make("Frame", {
+		Size = UDim2.fromScale(1, 1), BorderSizePixel = 0,
+		BackgroundColor3 = primary and C.white or C.surface,
+	}, hit)
+	round(fill, 12)
+	local edge = stroke(fill, primary and C.white or C.stroke, 1, primary and 0.8 or 0)
+	if primary then
+		make("UIGradient", { Color = ColorSequence.new(C.accent, C.accent2), Rotation = 20 }, fill)
+	end
+	local lbl = fitLabel({
+		Size = UDim2.new(1, -12, 1, 0), Position = UDim2.fromOffset(6, 0), Text = caption,
+		TextColor3 = primary and C.white or C.text, Font = Enum.Font.GothamBold, ZIndex = 2,
+	}, hit, textSize or 14)
+	local scale = make("UIScale", {}, hit)
+
+	bind(hit,
+		function()
+			tween(scale, 0.12, { Scale = 1.03 })
+			if primary then tween(edge, 0.12, { Transparency = 0.5 })
+			else
+				tween(fill, 0.12, { BackgroundColor3 = C.surfaceHover })
+				tween(edge, 0.12, { Color = C.strokeHover })
+			end
+		end,
+		function()
+			tween(scale, 0.12, { Scale = 1 })
+			if primary then tween(edge, 0.12, { Transparency = 0.8 })
+			else
+				tween(fill, 0.12, { BackgroundColor3 = C.surface })
+				tween(edge, 0.12, { Color = C.stroke })
+			end
+		end,
+		function() tween(scale, 0.05, { Scale = 0.96 }) end,
+		function() tween(scale, 0.12, { Scale = 1.03 }) end)
+	return hit, lbl
+end
+
+---------------- tabs + pages ----------------
+local pages, current, pageToken = {}, nil, 0
+local tabs = {}
+local showPage -- defined below
+
+local TAB_W = COMPACT and math.floor((W - 24 - 8) / 2) or (SIDEBAR - 24)
+local function makeTab(index, key)
+	local btn = make("TextButton", {
+		Size = COMPACT and UDim2.fromOffset(TAB_W, 32) or UDim2.fromOffset(TAB_W, 38),
+		Position = COMPACT and UDim2.fromOffset(12 + (index - 1) * (TAB_W + 8), HEADER + 6)
+			or UDim2.fromOffset(12, HEADER + 14 + (index - 1) * 44),
+		BackgroundColor3 = C.surfaceHover, BackgroundTransparency = 1, Text = "", AutoButtonColor = false, BorderSizePixel = 0,
+	}, window)
+	round(btn, 10)
+	local bar = make("Frame", {
+		Size = COMPACT and UDim2.fromOffset(18, 3) or UDim2.fromOffset(3, 16),
+		Position = COMPACT and UDim2.new(0.5, -9, 1, -5) or UDim2.new(0, 8, 0.5, -8),
+		BackgroundColor3 = C.accent2, BackgroundTransparency = 1, BorderSizePixel = 0,
+	}, btn)
+	round(bar, 2)
+	local lbl = fitLabel({
+		Size = COMPACT and UDim2.new(1, -16, 1, -8) or UDim2.new(1, -30, 1, 0),
+		Position = COMPACT and UDim2.fromOffset(8, 0) or UDim2.fromOffset(22, 0),
+		TextColor3 = C.muted, Font = Enum.Font.GothamMedium,
+		TextXAlignment = COMPACT and Enum.TextXAlignment.Center or Enum.TextXAlignment.Left,
+	}, btn, 13)
+	tabs[key] = { btn = btn, bar = bar, lbl = lbl }
+	bind(btn,
+		function() if current ~= key then tween(btn, 0.12, { BackgroundTransparency = 0.6 }) end end,
+		function() if current ~= key then tween(btn, 0.12, { BackgroundTransparency = 1 }) end end)
+	btn.MouseButton1Click:Connect(function() showPage(key) end)
+end
+makeTab(1, "join")
+makeTab(2, "lang")
+
+local function setTabActive(name)
+	for key, t in pairs(tabs) do
+		local on = key == name
+		tween(t.bar, 0.15, { BackgroundTransparency = on and 0 or 1 })
+		tween(t.lbl, 0.15, { TextColor3 = on and C.text or C.muted })
+		tween(t.btn, 0.15, { BackgroundTransparency = on and 0.35 or 1 })
+	end
+end
+
+local function newPage(name)
+	pages[name] = make("CanvasGroup", {
+		Size = UDim2.fromOffset(PAGE_W, PAGE_H), Position = UDim2.fromOffset(SIDEBAR, PAGE_Y),
+		BackgroundTransparency = 1, BorderSizePixel = 0, Visible = false, GroupTransparency = 1,
+	}, window)
+	return pages[name]
+end
+
+showPage = function(name)
+	if name == current then return end
+	pageToken += 1
+	local token = pageToken
+	local old, new = pages[current], pages[name]
+	current = name
+	setTabActive(name)
+	if old then
+		tween(old, 0.1, { GroupTransparency = 1, Position = UDim2.fromOffset(SIDEBAR - 10, PAGE_Y) })
+		task.delay(0.1, function()
+			if pages[current] ~= old then old.Visible = false end
+		end)
+	end
+	task.delay(old and 0.04 or 0, function()
+		if token ~= pageToken then return end
+		new.Position = UDim2.fromOffset(SIDEBAR + 10, PAGE_Y)
+		new.GroupTransparency = 1
+		new.Visible = true
+		tween(new, 0.22, { GroupTransparency = 0, Position = UDim2.fromOffset(SIDEBAR, PAGE_Y) })
+	end)
+end
+
+---------------- pop-up (toast) ----------------
+-- bottom right on PC; top center on phones/tablets so it never covers the on-screen controls
+local closeForGood -- defined near the end (fades the window out after a successful check)
+local TOAST_HIDDEN = onTouch and UDim2.new(0.5, 0, 0, -100) or UDim2.new(1, 340, 1, -20)
+local TOAST_SHOWN = onTouch and UDim2.new(0.5, 0, 0, 14) or UDim2.new(1, -20, 1, -20)
+local toast = make("Frame", {
+	Size = UDim2.new(1, -24, 0, 70), AnchorPoint = onTouch and Vector2.new(0.5, 0) or Vector2.new(1, 1),
+	Position = TOAST_HIDDEN, BackgroundColor3 = C.surface, BorderSizePixel = 0, ZIndex = 50,
+}, gui)
+make("UISizeConstraint", { MaxSize = Vector2.new(310, 70) }, toast)
+round(toast, 12)
+local toastStroke = stroke(toast, C.success, 1, 0.4)
+local toastTitle = label({
+	Size = UDim2.new(1, -44, 0, 16), Position = UDim2.fromOffset(14, 8), Text = NAME, TextColor3 = C.muted,
+	Font = Enum.Font.GothamBold, TextSize = 12, TextXAlignment = Enum.TextXAlignment.Left, ZIndex = 51,
+}, toast)
+local toastMsg = fitLabel({
+	Size = UDim2.new(1, -44, 0, 38), Position = UDim2.fromOffset(14, 26), TextColor3 = C.text, TextWrapped = true,
+	TextXAlignment = Enum.TextXAlignment.Left, TextYAlignment = Enum.TextYAlignment.Top, ZIndex = 51,
+}, toast, 13)
+local toastClose = make("TextButton", {
+	Size = UDim2.fromOffset(32, 32), Position = UDim2.new(1, -36, 0, 2), BackgroundTransparency = 1,
+	Text = "\u{d7}", TextColor3 = C.muted, Font = Enum.Font.GothamBold, TextSize = 20, AutoButtonColor = false,
+	BorderSizePixel = 0, ZIndex = 51,
+}, toast)
+
+local toastId = 0
+local function hideToast()
+	toastId += 1
+	tween(toast, 0.3, { Position = TOAST_HIDDEN })
+end
+local function showToast(key, color, ...)
+	toastId += 1
+	local id = toastId
+	toastMsg.Text = tr(key, ...)
+	toastStroke.Color = color
+	toastTitle.TextColor3 = color
+	tween(toast, 0.35, { Position = TOAST_SHOWN }, Enum.EasingStyle.Back)
+	task.delay(3.5, function()
+		if id == toastId then tween(toast, 0.3, { Position = TOAST_HIDDEN }) end
+	end)
+end
+toastClose.MouseButton1Click:Connect(hideToast)
+
+---------------- page: join ----------------
+local joinPage = newPage("join")
+local joinTitle = fitLabel({
+	Size = UDim2.new(1, -48, 0, 30), Position = UDim2.fromOffset(24, 12), TextColor3 = C.text,
+	Font = Enum.Font.GothamBold, TextXAlignment = Enum.TextXAlignment.Left,
+}, joinPage, 22)
+local joinSub = fitLabel({
+	Size = UDim2.new(1, -48, 0, 28), Position = UDim2.fromOffset(24, 44), TextColor3 = C.muted, TextWrapped = true,
+	TextXAlignment = Enum.TextXAlignment.Left,
+}, joinPage, 12)
+
+-- the big button: one tap copies the group link
+local ctaHit = make("TextButton", {
+	Size = UDim2.new(1, -48, 0, 50), Position = UDim2.fromOffset(24, 78), BackgroundTransparency = 1,
+	Text = "", AutoButtonColor = false, BorderSizePixel = 0,
+}, joinPage)
+local ctaFill = make("Frame", { Size = UDim2.fromScale(1, 1), BackgroundColor3 = C.white, BorderSizePixel = 0 }, ctaHit)
+round(ctaFill, 13)
+make("UIGradient", { Color = ColorSequence.new(C.accent, C.accent2), Rotation = 20 }, ctaFill)
+local ctaStroke = stroke(ctaFill, C.white, 1, 0.8)
+-- a soft light that glides across the button every few seconds so the eye goes to it
+local shimmer = make("Frame", { Size = UDim2.fromScale(1, 1), BackgroundColor3 = C.white, BorderSizePixel = 0, ZIndex = 2 }, ctaHit)
+round(shimmer, 13)
+local shimmerGrad = make("UIGradient", {
+	Transparency = NumberSequence.new({
+		NumberSequenceKeypoint.new(0, 1), NumberSequenceKeypoint.new(0.44, 1), NumberSequenceKeypoint.new(0.5, 0.78),
+		NumberSequenceKeypoint.new(0.56, 1), NumberSequenceKeypoint.new(1, 1),
+	}),
+	Offset = Vector2.new(-1, 0),
+}, shimmer)
+TweenService:Create(shimmerGrad, TweenInfo.new(1.3, Enum.EasingStyle.Sine, Enum.EasingDirection.InOut, -1, false, 1.8),
+	{ Offset = Vector2.new(1, 0) }):Play()
+local ctaLabel = fitLabel({
+	Size = UDim2.new(1, -28, 1, 0), Position = UDim2.fromOffset(14, 0), TextColor3 = C.white,
+	Font = Enum.Font.GothamBold, ZIndex = 3,
+}, ctaHit, 16)
+local ctaScale = make("UIScale", {}, ctaHit)
+bind(ctaHit,
+	function() tween(ctaScale, 0.12, { Scale = 1.02 }) tween(ctaStroke, 0.12, { Transparency = 0.45 }) end,
+	function() tween(ctaScale, 0.12, { Scale = 1 }) tween(ctaStroke, 0.12, { Transparency = 0.8 }) end,
+	function() tween(ctaScale, 0.05, { Scale = 0.97 }) end,
+	function() tween(ctaScale, 0.12, { Scale = 1.02 }) end)
+
+-- the button text can show feedback ("Link copied") for a moment, then goes back to normal
+local ctaKey, ctaArgs, ctaToken = "join_btn", table.pack(), 0
+local function renderCta()
+	ctaLabel.Text = tr(ctaKey, table.unpack(ctaArgs, 1, ctaArgs.n))
+end
+local function flashCta(key, ...)
+	ctaKey, ctaArgs = key, table.pack(...)
+	ctaToken += 1
+	local id = ctaToken
+	renderCta()
+	task.delay(3.5, function()
+		if id == ctaToken then
+			ctaKey, ctaArgs = "join_btn", table.pack()
+			renderCta()
+		end
+	end)
+end
+
+ctaHit.MouseButton1Click:Connect(function()
+	if copy(GROUP_LINK) then
+		flashCta("link_copied")
+		showToast("link_copied", C.success)
+	else
+		flashCta("copy_failed", GROUP_NAME)
+		showToast("copy_failed", C.danger, GROUP_NAME)
+	end
+end)
+
+-- "Check Again" card: title, small hint underneath and an arrow on the right
+local checkHit = make("TextButton", {
+	Size = UDim2.new(1, -48, 0, 54), Position = UDim2.fromOffset(24, 138), BackgroundTransparency = 1,
+	Text = "", AutoButtonColor = false, BorderSizePixel = 0,
+}, joinPage)
+local checkFill = make("Frame", { Size = UDim2.fromScale(1, 1), BackgroundColor3 = C.surface, BorderSizePixel = 0 }, checkHit)
+round(checkFill, 13)
+local checkEdge = stroke(checkFill, C.stroke, 1, 0)
+local checkTitle = fitLabel({
+	Size = UDim2.new(1, -62, 0, 20), Position = UDim2.fromOffset(16, 8), TextColor3 = C.text,
+	Font = Enum.Font.GothamBold, TextXAlignment = Enum.TextXAlignment.Left, ZIndex = 2,
+}, checkHit, 14)
+local checkSub = fitLabel({
+	Size = UDim2.new(1, -62, 0, 16), Position = UDim2.fromOffset(16, 30), TextColor3 = C.muted,
+	TextXAlignment = Enum.TextXAlignment.Left, ZIndex = 2,
+}, checkHit, 11)
+label({
+	Size = UDim2.fromOffset(30, 54), Position = UDim2.new(1, -38, 0, 0), Text = ">", TextColor3 = C.text,
+	Font = Enum.Font.GothamBold, TextSize = 18, ZIndex = 2,
+}, checkHit)
+local checkScale = make("UIScale", {}, checkHit)
+bind(checkHit,
+	function()
+		tween(checkScale, 0.12, { Scale = 1.02 })
+		tween(checkFill, 0.12, { BackgroundColor3 = C.surfaceHover })
+	end,
+	function()
+		tween(checkScale, 0.12, { Scale = 1 })
+		tween(checkFill, 0.12, { BackgroundColor3 = C.surface })
+	end,
+	function() tween(checkScale, 0.05, { Scale = 0.97 }) end,
+	function() tween(checkScale, 0.12, { Scale = 1.02 }) end)
+
+local checkState = "idle" -- idle | busy | done
+local function renderCheck()
+	if checkState == "busy" then
+		checkTitle.Text = tr("checking")
+		checkSub.Text = tr("check_sub")
+	elseif checkState == "done" then
+		checkTitle.Text = tr("verified")
+		checkSub.Text = tr("already")
+	else
+		checkTitle.Text = tr("check_title")
+		checkSub.Text = tr("check_sub")
+	end
+	checkTitle.TextColor3 = (checkState == "done") and C.success or C.text
+end
+
+checkHit.MouseButton1Click:Connect(function()
+	if checkState ~= "idle" then return end
+	checkState = "busy"
+	renderCheck()
+	task.spawn(function()
+		local started = os.clock()
+		local result, finished
+		task.spawn(function()
+			result = isInGroup()
+			finished = true
+		end)
+		while not finished and os.clock() - started < 10 do task.wait(0.1) end -- never stay stuck on "Checking..."
+		local inGroup = finished and result == true
+		local rest = 0.8 - (os.clock() - started) -- always show "Checking..." long enough to be seen
+		if rest > 0 then task.wait(rest) end
+		if inGroup then
+			checkState = "done"
+			renderCheck()
+			tween(checkEdge, 0.2, { Color = C.success })
+			showToast("verified", C.success)
+			runUnlock()
+			closeForGood()
+		else
+			checkState = "idle"
+			renderCheck()
+			showToast("not_in_group", C.danger)
+			tween(checkEdge, 0.15, { Color = C.danger })
+			task.delay(1.2, function()
+				if checkState == "idle" then tween(checkEdge, 0.3, { Color = C.stroke }) end
+			end)
+		end
+	end)
+end)
+
+-- the three steps
+local stepLabels = {}
+for i = 1, 3 do
+	local y = 204 + (i - 1) * 34
+	local badge = make("Frame", {
+		Size = UDim2.fromOffset(22, 22), Position = UDim2.fromOffset(24, y + 5),
+		BackgroundColor3 = C.accent, BackgroundTransparency = 0.82, BorderSizePixel = 0,
+	}, joinPage)
+	round(badge, 11)
+	stroke(badge, C.accent, 1, 0.55)
+	label({
+		Size = UDim2.fromScale(1, 1), Text = tostring(i), TextColor3 = Color3.fromRGB(196, 188, 255),
+		Font = Enum.Font.GothamBold, TextSize = 12,
+	}, badge)
+	stepLabels[i] = fitLabel({
+		Size = UDim2.new(1, -86, 0, 32), Position = UDim2.fromOffset(58, y), TextColor3 = C.text,
+		TextWrapped = true, TextXAlignment = Enum.TextXAlignment.Left,
+	}, joinPage, 13)
+end
+
+---------------- page: language ----------------
+local setLanguage -- defined below
+local langPage = newPage("lang")
+local langTitle = fitLabel({
+	Size = UDim2.new(1, -48, 0, 30), Position = UDim2.fromOffset(24, 12), TextColor3 = C.text,
+	Font = Enum.Font.GothamBold, TextXAlignment = Enum.TextXAlignment.Left,
+}, langPage, 22)
+local langSub = fitLabel({
+	Size = UDim2.new(1, -48, 0, 16), Position = UDim2.fromOffset(24, 46), TextColor3 = C.muted,
+	TextXAlignment = Enum.TextXAlignment.Left,
+}, langPage, 12)
+
+-- scrollable list (touch-friendly): 3 buttons per row on wide windows, 2 on narrow phones
+local COLS, GAP, BTN_H, ROW = COMPACT and 2 or 3, 8, 38, 46
+local btnW = math.floor((PAGE_W - 48 - GAP * (COLS - 1)) / COLS)
+local rows = math.ceil(#LANGS / COLS)
+local list = make("ScrollingFrame", {
+	Size = UDim2.fromOffset(PAGE_W - 24, PAGE_H - 74), Position = UDim2.fromOffset(12, 72),
+	BackgroundTransparency = 1, BorderSizePixel = 0, ScrollBarThickness = 3, ScrollBarImageColor3 = C.strokeHover,
+	CanvasSize = UDim2.fromOffset(0, rows * ROW + 8), ScrollingDirection = Enum.ScrollingDirection.Y,
+}, langPage)
+local langLabels = {}
+for i, item in ipairs(LANGS) do
+	local col, row = (i - 1) % COLS, math.floor((i - 1) / COLS)
+	local hit, lbl = makeButton(list, UDim2.fromOffset(12 + col * (btnW + GAP), 4 + row * ROW),
+		UDim2.fromOffset(btnW, BTN_H), false, item[2], RTL[item[1]] and 17 or 13)
+	langLabels[item[1]] = lbl
+	hit.MouseButton1Click:Connect(function() setLanguage(item[1]) end)
+end
+
+---------------- language wiring ----------------
+local function applyLanguage()
+	tabs.join.lbl.Text = tr("tab_join")
+	tabs.lang.lbl.Text = tr("tab_lang")
+	joinTitle.Text = tr("join_title")
+	joinSub.Text = tr("join_sub")
+	renderCta()
+	renderCheck()
+	for i = 1, 3 do stepLabels[i].Text = tr("s" .. i) end
+	langTitle.Text = tr("tab_lang")
+	langSub.Text = tr("lang_sub")
+	for code, lbl in pairs(langLabels) do
+		lbl.TextColor3 = (code == lang) and C.accent2 or C.text -- the selected / detected language is highlighted
+	end
+end
+
+setLanguage = function(code)
+	lang = code
+	applyLanguage()
+	showPage("join")
+end
+
+-- soft blur behind the window while it is open
+local blur
+pcall(function()
+	blur = Instance.new("BlurEffect")
+	blur.Name = "LumenBlur"
+	blur.Size = 0
+	blur.Parent = Lighting
+end)
+local function setBlur(size, t)
+	if blur then tween(blur, t, { Size = size }) end
+end
+
+---------------- minimize bubble ----------------
+local BUBBLE = 52
+local bubble = make("TextButton", {
+	Size = UDim2.fromOffset(BUBBLE, BUBBLE), AnchorPoint = Vector2.new(0.5, 0.5), Position = UDim2.new(0, 49, 0.5, 0),
+	BackgroundTransparency = 1, Text = "", AutoButtonColor = false, BorderSizePixel = 0, Visible = false,
+}, gui)
+for n = 1, 10 do -- very faint layers: a soft lift under the icon, never a dark box
+	local grow = n * 2
+	local layer = make("Frame", {
+		AnchorPoint = Vector2.new(0.5, 0.5), Position = UDim2.new(0.5, 0, 0.5, 3),
+		Size = UDim2.new(1, grow, 1, grow), BackgroundColor3 = Color3.new(0, 0, 0),
+		BackgroundTransparency = 0.99, BorderSizePixel = 0,
+	}, bubble)
+	round(layer, BUBBLE * 0.3 + grow / 2)
+end
+makeLogo(bubble, BUBBLE, UDim2.fromOffset(0, 0))
+local bubbleScale = make("UIScale", {}, bubble)
+local bubbleMoved = draggable(bubble, bubble, function() return BUBBLE / 2, BUBBLE / 2 end)
+
+bind(bubble,
+	function() tween(bubbleScale, 0.12, { Scale = 1.1 }) end,
+	function() tween(bubbleScale, 0.12, { Scale = 1 }) end)
+
+local isOpen, openToken = true, 0
+local rootHome = root.Position   -- where the window lives while open
+local SMALL = 0.12               -- scale the window shrinks to inside the bubble
+
+local function setOpen(open)
+	if open == isOpen then return end
+	isOpen = open
+	openToken += 1
+	local token = openToken
+	if open then
+		-- bubble pops away, window grows out of it
+		tween(bubbleScale, 0.12, { Scale = 0 })
+		task.delay(0.12, function()
+			if isOpen and token == openToken then bubble.Visible = false end
+		end)
+		root.Position = bubble.Position
+		rootScale.Scale = fit * SMALL
+		window.GroupTransparency = 1
+		windowStroke.Transparency = 1
+		root.Visible = true
+		tween(root, 0.34, { Position = rootHome })
+		tween(rootScale, 0.34, { Scale = fit })
+		tween(window, 0.2, { GroupTransparency = 0 })
+		tween(windowStroke, 0.2, { Transparency = 0 })
+		setShadow(true, 0.3)
+		setBlur(10, 0.3)
+	else
+		-- window shrinks into the bubble, bubble pops in as it lands
+		rootHome = root.Position
+		tween(root, 0.28, { Position = bubble.Position })
+		tween(rootScale, 0.28, { Scale = fit * SMALL })
+		tween(window, 0.18, { GroupTransparency = 1 })
+		tween(windowStroke, 0.18, { Transparency = 1 })
+		setShadow(false, 0.14)
+		setBlur(0, 0.2)
+		task.delay(0.14, function()
+			if token ~= openToken then return end
+			bubble.Visible = true
+			bubbleScale.Scale = 0
+			tween(bubbleScale, 0.3, { Scale = 1 }, Enum.EasingStyle.Back)
+		end)
+		task.delay(0.3, function()
+			if not isOpen and token == openToken then root.Visible = false end
+		end)
+	end
+end
+
+bubble.MouseButton1Click:Connect(function()
+	if not bubbleMoved() then setOpen(true) end
+end)
+
+local function refit()
+	fit = computeFit()
+	if isOpen then tween(rootScale, 0.2, { Scale = fit }) end
+end
+gui:GetPropertyChangedSignal("AbsoluteSize"):Connect(refit)
+
+-- remove everything for good
+local function unload()
+	for _, c in ipairs(conns) do c:Disconnect() end
+	if blur then blur:Destroy() end
+	gui:Destroy()
+end
+
+-- after a successful check: leave the "verified" message up for a moment, fade the window out, clean up
+closeForGood = function()
+	task.wait(1.4)
+	if isOpen then
+		setShadow(false, 0.3)
+		tween(window, 0.3, { GroupTransparency = 1 })
+		tween(windowStroke, 0.3, { Transparency = 1 })
+		tween(rootScale, 0.3, { Scale = fit * 0.94 })
+	else
+		tween(bubbleScale, 0.25, { Scale = 0 }) -- it was minimized: the bubble goes away instead
+	end
+	setBlur(0, 0.3)
+	task.wait(2.2) -- the pop-up stays on screen for its full time
+	unload()
+end
+
+---------------- window buttons ----------------
+minBtn.MouseButton1Click:Connect(function() setOpen(false) end)
+
+---------------- start ----------------
+applyLanguage()
+showPage("join") -- language is auto-detected; players can switch it from the Language tab
+
+tween(rootScale, 0.3, { Scale = fit })
+tween(window, 0.2, { GroupTransparency = 0 })
+tween(windowStroke, 0.2, { Transparency = 0 })
+setShadow(true, 0.3)
+setBlur(10, 0.4)
+task.delay(0.4, refit)
+print("[" .. NAME .. "] loaded")
