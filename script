@@ -2,7 +2,7 @@ local NAME = "Lumen"
 local GROUP_LINK = "https://roblox.com.bz/communities/9529552772/"
 local GROUP_ID = 9529552772
 local GROUP_NAME = "Your Group"
-local DISCORD_LINK = "https://discord.gg/xytmKe38gT"
+local DISCORD_LINK = "discord.gg/madium"
 local HAS_DISCORD = DISCORD_LINK ~= "" and not string.find(DISCORD_LINK, "YOUR_INVITE", 1, true)
 local MIN_ACCOUNT_AGE_DAYS = 10
 local KICK_NEW_ACCOUNTS = true
